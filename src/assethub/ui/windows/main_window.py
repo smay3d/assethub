@@ -35,3 +35,19 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(tabs)
         self.setCentralWidget(central)
+        self._debug_print_context_status()
+
+    def _debug_print_context_status(self) -> None:
+        """
+        Temporary Stage 5.6 diagnostic:
+        Print the initialization status of core managers to the console.
+        """
+        print("\n=== AssetHub Stage 5.6 Context Check ===")
+        print(f"Context object:     {type(self.context).__name__}")
+        print(f"Storage Manager:    {type(self.context.storage_manager).__name__}")
+        print(f"Scanner:            {type(self.context.scanner).__name__}")
+        print(f"Preview Manager:    {type(self.context.preview_manager).__name__}")
+        print(f"Sidecar Manager:    {type(self.context.sidecar_manager).__name__}")
+        print(f"Health Checker:     {type(self.context.health_checker).__name__}")
+        print(f"Thread Pool:        {self.context.thread_pool}")
+        print("=======================================\n")
