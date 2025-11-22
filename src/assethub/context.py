@@ -5,6 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional, Dict
 
+from PySide6.QtCore import QThreadPool
+
+from .core.storage.roots import StorageManager
+from .core.scanner.scanner import Scanner
+from .core.previews.manager import PreviewManager
+from .core.sidecar.manager import SidecarManager
+from .core.health.checker import HealthChecker
+
 
 @dataclass
 class AppConfig:
@@ -34,22 +42,31 @@ class AppContext:
 
     config: AppConfig
 
-    # Core subsystems (to be wired in later stages):
+    # Core subsystems (wired in Stage 5.6, implemented later):
     db_connection: Optional[Any] = None
-    storage_manager: Optional[Any] = None
-    scanner: Optional[Any] = None
-    preview_manager: Optional[Any] = None
-    sidecar_manager: Optional[Any] = None
-    health_checker: Optional[Any] = None
-    thread_pool: Optional[Any] = None  # Will likely be a QThreadPool
+    storage_manager: Optional[StorageManager] = None
+    scanner: Optional[Scanner] = None
+    preview_manager: Optional[PreviewManager] = None
+    sidecar_manager: Optional[SidecarManager] = None
+    health_checker: Optional[HealthChecker] = None
+    thread_pool: Optional[QThreadPool] = None
 
     def initialize_core_services(self) -> None:
         """
-        Initialize core services.
+        Initialize core service objects.
 
-        This will be filled in a later stage when the actual implementations
-        exist. For now it's a structural placeholder.
+        Stage 5.6: only construct manager instances and thread pool.
+        No DB schema creation or filesystem scanning yet.
         """
 
-        # TODO: instantiate db_connection, storage_manager, etc.
-        pass
+        # NOTE: db_connection stays None until Stage 5.7+.
+        # It will be created and assigned alongside schema initialization.
+
+        self.storage_manager = StorageManager()
+        self.sidecar_manager = SidecarManager(self.config.sidecar_root)
+        self.preview_manager = PreviewManager()
+        self.health_checker = HealthChecker()
+        self.scanner = Scanner()
+
+        # Shared Qt thread pool for background tasks
+        self.thread_pool = QThreadPool.globalInstance()

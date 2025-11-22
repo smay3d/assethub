@@ -29,16 +29,18 @@ def run_app() -> None:
     """
     Main application entry point for AssetHub.
 
-    Startup sequence (minimal skeleton):
+    Startup sequence (Stage 5.6):
     1. Load config.
     2. Create AppContext.
-    3. Construct and show MainWindow.
-    4. Enter Qt event loop.
+    3. Initialize core services (managers, thread pool).
+    4. Construct and show MainWindow.
+    5. Enter Qt event loop.
     """
     app = _ensure_qt_application()
 
     config = load_app_config()
     context = AppContext(config=config)
+    context.initialize_core_services()
 
     window = MainWindow(context)
     window.show()
