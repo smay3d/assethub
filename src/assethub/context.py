@@ -12,6 +12,8 @@ from .core.scanner.scanner import Scanner
 from .core.previews.manager import PreviewManager
 from .core.sidecar.manager import SidecarManager
 from .core.health.checker import HealthChecker
+from .core.db.connection import get_connection
+from .core.db.schema import initialize_schema
 
 
 @dataclass
@@ -55,12 +57,17 @@ class AppContext:
         """
         Initialize core service objects.
 
-        Stage 5.6: only construct manager instances and thread pool.
-        No DB schema creation or filesystem scanning yet.
+        Stage 6.1:
+          - Open/create the SQLite database.
+          - Ensure the minimal v0 schema exists.
+
+        Stage 5.6 still applies for the remaining services:
+          - Construct manager instances and the shared thread pool.
         """
 
-        # NOTE: db_connection stays None until Stage 5.7+.
-        # It will be created and assigned alongside schema initialization.
+        # Stage 6.1: create/open DB and ensure minimal schema exists.
+        self.db_connection = get_connection(self.config.db_path)
+        initialize_schema(self.db_connection)
 
         self.storage_manager = StorageManager()
         self.sidecar_manager = SidecarManager(self.config.sidecar_root)

@@ -14,7 +14,7 @@ def get_connection(db_path: str) -> sqlite3.Connection:
     """
     Return a global SQLite connection for the given database path.
 
-    Skeleton version: no schema creation yet.
+    Schema creation is handled separately (see `assethub.core.db.schema`).
     """
     global _connection
 
@@ -22,5 +22,7 @@ def get_connection(db_path: str) -> sqlite3.Connection:
         path = Path(db_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         _connection = sqlite3.connect(path)
+        # Default safety/consistency settings.
+        _connection.execute("PRAGMA foreign_keys = ON;")
 
     return _connection
