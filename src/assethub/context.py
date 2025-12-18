@@ -69,7 +69,9 @@ class AppContext:
         self.db_connection = get_connection(self.config.db_path)
         initialize_schema(self.db_connection)
 
-        self.storage_manager = StorageManager()
+        self.storage_manager = StorageManager(self.db_connection)
+        # Stage 6.2: guarantee Unmanaged storage exists
+        self.storage_manager.ensure_unmanaged_storage()
         self.sidecar_manager = SidecarManager(self.config.sidecar_root)
         self.preview_manager = PreviewManager()
         self.health_checker = HealthChecker()
