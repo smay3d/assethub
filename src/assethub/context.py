@@ -75,7 +75,7 @@ class AppContext:
         self.sidecar_manager = SidecarManager(self.config.sidecar_root)
         self.preview_manager = PreviewManager()
         self.health_checker = HealthChecker()
-        self.scanner = Scanner()
+        self.scanner = Scanner(self.db_connection, self.storage_manager)
 
         # Shared Qt thread pool for background tasks
         self.thread_pool = QThreadPool.globalInstance()

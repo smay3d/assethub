@@ -4,25 +4,21 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Optional
-
-
-_connection: Optional[sqlite3.Connection] = None
 
 
 def get_connection(db_path: str) -> sqlite3.Connection:
     """
-    Return a global SQLite connection for the given database path.
+    Open (or create) a SQLite database connection at db_path.
+
+    This function intentionally does NOT cache connections globally.
+    The AppContext owns the lifetime of the connection in the running app.
 
     Schema creation is handled separately (see `assethub.core.db.schema`).
     """
-    global _connection
+    path = Path(db_path).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    if _connection is None:
-        path = Path(db_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _connection = sqlite3.connect(path)
-        # Default safety/consistency settings.
-        _connection.execute("PRAGMA foreign_keys = ON;")
-
-    return _connection
+    conn = sqlite3.connect(str(path))
+    # Default safety/consistency settings.
+    conn.execute("PRAGMA foreign_keys = ON;")
+    return conn
