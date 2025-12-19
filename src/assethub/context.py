@@ -74,7 +74,8 @@ class AppContext:
         self.storage_manager.ensure_unmanaged_storage()
         self.sidecar_manager = SidecarManager(self.config.sidecar_root)
         self.preview_manager = PreviewManager()
-        self.health_checker = HealthChecker()
+        # Stage 6.4: health checker needs DB + storage to validate on-disk paths
+        self.health_checker = HealthChecker(self.db_connection, self.storage_manager)
         self.scanner = Scanner(self.db_connection, self.storage_manager)
 
         # Shared Qt thread pool for background tasks
