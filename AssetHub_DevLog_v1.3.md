@@ -56,10 +56,62 @@ Stage 5 delivered a fully functional application skeleton with wiring for manage
 
 ---
 
-## Next Stage  
-**Stage 6 — Implement Core Systems**  
-- DB connection layer  
-- Minimal v0 schema creation  
-- Storage root handling  
-- Basic scanner operations  
-- AppContext integration with database schema initialization  
+## Stage 6 — Core Systems Implementation
+
+**Status:** In Progress (through Stage 6.3)
+
+**Dates:** 2025-12-18
+
+**Tests:** Passing (9 tests)
+
+### Overview
+
+Stage 6 transitions AssetHub from a structural skeleton into a functioning backend system. The focus is on correctness, invariants, and testability, intentionally deferring UI population, asset semantics, and preview generation.
+
+---
+
+### 6.1 — Database Initialization & Schema
+
+**Status:** Complete
+
+- Implemented SQLite database bootstrap at application startup.
+- Added idempotent schema creation for minimal v0 tables:
+    - `storage`, `asset`, `version`, `file`, `tag`, `asset_tag`
+    - `schema_version` table for future migrations.
+- Enabled foreign key enforcement.
+- Added tests validating schema creation and table existence.
+
+---
+
+### 6.2 — Storage Roots & Unmanaged Invariant
+
+**Status:** Complete
+
+- Implemented `StorageManager` backed by the `storage` table.
+- Added persistent registration of storage roots.
+- Guaranteed existence of a single `Unmanaged` storage entry.
+- Implemented deterministic path resolution using longest-prefix matching.
+- Added tests covering root registration, resolution, and unmanaged fallback.
+
+---
+
+### 6.3 — Scanner v1 (Files-Only Indexing)
+
+**Status:** Complete
+
+- Implemented first functional scanner pass:
+    - Walks registered storage roots only.
+    - Indexes physical files into the `file` table.
+    - Stores `storage_id`, `relative_path`, `size_bytes`, `mtime_unix`.
+    - Uses upsert logic to allow safe re-scans.
+- Explicitly does **not** create assets, versions, or tags.
+- Added `test_scanner_basic.py` validating recursive scanning and relative path handling.
+
+### Supporting Fixes
+
+- Simplified `get_connection()` to be a pure connection factory (no global caching).
+- Clarified DB connection lifetime ownership under `AppContext`.
+
+---
+
+*Stage 6.4 (Health v1: missing detection) is next.*
