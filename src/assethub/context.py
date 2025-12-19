@@ -36,15 +36,20 @@ class AppConfig:
 @dataclass
 class AppContext:
     """
-    Global application context.
+    AppContext is the composition root of the AssetHub application.
 
-    Holds references to core subsystems so they can be shared between
-    the UI, scanner, and other components.
+    It owns and initializes all long-lived core services such as the
+    database connection, storage manager, scanner, and health checker.
+    UI layers and other subsystems should treat AppContext as the single
+    authoritative access point for shared application state.
+
+    AppContext is responsible for the lifetime of the resources it
+    creates and must be explicitly shut down when the application exits.
     """
 
     config: AppConfig
 
-    # Core subsystems (wired in Stage 5.6, implemented later):
+    # Core subsystems:
     db_connection: Optional[Any] = None
     storage_manager: Optional[StorageManager] = None
     scanner: Optional[Scanner] = None
@@ -55,28 +60,39 @@ class AppContext:
 
     def initialize_core_services(self) -> None:
         """
-        Initialize core service objects.
+        Initialize all core application services.
 
-        Stage 6.1:
-          - Open/create the SQLite database.
-          - Ensure the minimal v0 schema exists.
-
-        Stage 5.6 still applies for the remaining services:
-          - Construct manager instances and the shared thread pool.
+        Services are created in dependency order and are owned by the
+        AppContext for the lifetime of the application.
         """
+        # Initialize core services in dependency order.
 
-        # Stage 6.1: create/open DB and ensure minimal schema exists.
+        # Database (open connection and ensure minimal schema)
         self.db_connection = get_connection(self.config.db_path)
         initialize_schema(self.db_connection)
 
+        # Storage and indexing
         self.storage_manager = StorageManager(self.db_connection)
-        # Stage 6.2: guarantee Unmanaged storage exists
-        self.storage_manager.ensure_unmanaged_storage()
+        self.storage_manager.ensure_unmanaged_storage() # guarantee Unmanaged storage exists
+        self.scanner = Scanner(self.db_connection, self.storage_manager)
+
+        # Health checking (DB + Storage dependent)
+        self.health_checker = HealthChecker(self.db_connection, self.storage_manager)
+
+        # Auxiliary managers
         self.sidecar_manager = SidecarManager(self.config.sidecar_root)
         self.preview_manager = PreviewManager()
-        # Stage 6.4: health checker needs DB + storage to validate on-disk paths
-        self.health_checker = HealthChecker(self.db_connection, self.storage_manager)
-        self.scanner = Scanner(self.db_connection, self.storage_manager)
 
         # Shared Qt thread pool for background tasks
         self.thread_pool = QThreadPool.globalInstance()
+
+    def shutdown(self) -> None:
+        """
+        Cleanly release resources owned by the application context.
+
+        This should be called when the application is exiting.
+        """
+        conn = self.db_connection
+        if conn is not None:
+            conn.close()
+            self.db_connection = None
