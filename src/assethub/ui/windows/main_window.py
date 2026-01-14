@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QMainWindow, QTabWidget, QVBoxLayout, QWidget
 
+from assethub.ui.views.library_tab import LibraryTab
 from assethub.ui.views.scan_tab import ScanTab
 from assethub.context import AppContext
 
@@ -28,13 +29,20 @@ class MainWindow(QMainWindow):
 
         tabs = QTabWidget(central)
 
-        # Placeholder tabs (Stage 7.x will implement these)
-        tabs.addTab(QWidget(), "Library")
+        # Stage 7.2 implemented tab
+        self.library_tab = LibraryTab(self.context)
+        tabs.addTab(self.library_tab, "Library")
+
+        # Placeholder tab (Stage 7.3 will implement Detail)
         tabs.addTab(QWidget(), "Detail")
 
         # Stage 7.1 implemented tab
         self.scan_tab = ScanTab(self.context)
         tabs.addTab(self.scan_tab, "Scan")
+
+        # Refresh Library after scans/health checks.
+        self.scan_tab.scan_completed.connect(self.library_tab.refresh)
+        self.scan_tab.health_completed.connect(self.library_tab.refresh)
 
         tabs.addTab(QWidget(), "Settings")
 
