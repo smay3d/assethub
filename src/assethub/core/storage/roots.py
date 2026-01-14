@@ -116,6 +116,37 @@ class StorageManager:
             for r in rows
         ]
 
+    def count_files_for_storage(self, storage_id: int) -> int:
+        """Return number of tracked files referencing a given storage_id."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM file WHERE storage_id = ?;",
+            (int(storage_id),),
+        ).fetchone()
+        assert row is not None
+        return int(row[0])
+
+    def unregister_root(self, storage_id: int) -> None:
+        """Unregister a storage root by id.
+
+        Notes:
+          - This blocks deletion of the Unmanaged singleton.
+          - Callers should ensure there are no tracked files referencing the root.
+        """
+        sid = int(storage_id)
+        row = self._conn.execute(
+            "SELECT id, root_path, status FROM storage WHERE id = ?;",
+            (sid,),
+        ).fetchone()
+        if row is None:
+            return
+
+        _id, root_path, status = int(row[0]), row[1], str(row[2])
+        if root_path is None or status.upper() == self.UNMANAGED_STATUS:
+            raise ValueError("Cannot unregister Unmanaged storage")
+
+        self._conn.execute("DELETE FROM storage WHERE id = ?;", (sid,))
+        self._conn.commit()
+
     def resolve_storage_for_path(self, abs_path: str) -> Tuple[StorageRoot, str]:
         """Resolve an absolute path to (storage_root, relative_path).
 

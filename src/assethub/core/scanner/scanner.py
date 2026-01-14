@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from dataclasses import dataclass
-from typing import List
+from typing import Callable, List, Optional
 
 from assethub.core.storage.roots import StorageManager, StorageRoot
 
@@ -14,6 +14,7 @@ from assethub.core.storage.roots import StorageManager, StorageRoot
 class ScanResult:
     discovered_paths: List[str]
     files_indexed: int
+    canceled: bool = False
 
 
 class Scanner:
@@ -28,7 +29,7 @@ class Scanner:
         self._conn = conn
         self._storage = storage_manager
 
-    def scan_all(self) -> ScanResult:
+    def scan_all(self, *, cancel_check: Optional[Callable[[], bool]] = None) -> ScanResult:
         """Scan all registered storage roots and index files.
 
         Returns:
@@ -38,12 +39,31 @@ class Scanner:
         discovered: List[str] = []
         indexed = 0
 
+        def _should_cancel() -> bool:
+            if cancel_check is None:
+                return False
+            try:
+                return bool(cancel_check())
+            except Exception:
+                # Never allow cancel callback failures to crash a scan.
+                return False
+
         for root in roots:
             if root.root_path is None:
                 continue
 
+            if _should_cancel():
+                self._conn.commit()
+                return ScanResult(discovered_paths=discovered, files_indexed=indexed, canceled=True)
+
             for dirpath, _dirnames, filenames in os.walk(root.root_path):
+                if _should_cancel():
+                    self._conn.commit()
+                    return ScanResult(discovered_paths=discovered, files_indexed=indexed, canceled=True)
                 for fname in filenames:
+                    if _should_cancel():
+                        self._conn.commit()
+                        return ScanResult(discovered_paths=discovered, files_indexed=indexed, canceled=True)
                     abs_path = os.path.join(dirpath, fname)
 
                     # Best-effort: skip if file vanished mid-walk.
@@ -65,7 +85,7 @@ class Scanner:
                     indexed += 1
 
         self._conn.commit()
-        return ScanResult(discovered_paths=discovered, files_indexed=indexed)
+        return ScanResult(discovered_paths=discovered, files_indexed=indexed, canceled=False)
 
     # ---------------------------
     # Internals

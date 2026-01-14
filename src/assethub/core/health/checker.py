@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from assethub.core.storage.roots import StorageManager, StorageRoot
 
@@ -39,7 +39,7 @@ class HealthChecker:
         self._conn = conn
         self._storage = storage_manager
 
-    def check_all_files(self) -> List[HealthResult]:
+    def check_all_files(self, *, cancel_check: Optional[Callable[[], bool]] = None) -> List[HealthResult]:
         """Check all indexed files and update their integrity_state.
 
         Returns a list of per-file results describing the new state.
@@ -53,7 +53,17 @@ class HealthChecker:
         results: List[HealthResult] = []
         updates: List[Tuple[str, int]] = []
 
+        def _should_cancel() -> bool:
+            if cancel_check is None:
+                return False
+            try:
+                return bool(cancel_check())
+            except Exception:
+                return False
+
         for file_id, storage_id, rel in rows:
+            if _should_cancel():
+                break
             file_id_i = int(file_id)
             storage_id_i = int(storage_id)
             rel_s = str(rel)
@@ -69,12 +79,13 @@ class HealthChecker:
             results.append(HealthResult(file_id=file_id_i, new_state=new_state))
             updates.append((new_state, file_id_i))
 
-        # Apply updates in one batch.
-        self._conn.executemany(
-            "UPDATE file SET integrity_state = ? WHERE id = ?;",
-            updates,
-        )
-        self._conn.commit()
+        # Apply updates in one batch (for processed rows).
+        if updates:
+            self._conn.executemany(
+                "UPDATE file SET integrity_state = ? WHERE id = ?;",
+                updates,
+            )
+            self._conn.commit()
 
         return results
 

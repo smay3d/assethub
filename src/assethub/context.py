@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional, Dict
 
-from PySide6.QtCore import QThreadPool
+try:
+    from PySide6.QtCore import QThreadPool  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    QThreadPool = None  # type: ignore
+
+import threading
 
 from .core.storage.roots import StorageManager
 from .core.scanner.scanner import Scanner
@@ -58,6 +63,17 @@ class AppContext:
     health_checker: Optional[HealthChecker] = None
     thread_pool: Optional[QThreadPool] = None
 
+    class _ThreadPoolFallback:
+        """Very small fallback pool for non-Qt environments (tests/CI).
+
+        This is not a full QThreadPool replacement. It only supports `.start(runnable)`
+        where runnable has a `.run()` method.
+        """
+
+        def start(self, runnable: Any) -> None:
+            t = threading.Thread(target=getattr(runnable, "run"), daemon=True)
+            t.start()
+
     def initialize_core_services(self) -> None:
         """
         Initialize all core application services.
@@ -83,8 +99,11 @@ class AppContext:
         self.sidecar_manager = SidecarManager(self.config.sidecar_root)
         self.preview_manager = PreviewManager()
 
-        # Shared Qt thread pool for background tasks
-        self.thread_pool = QThreadPool.globalInstance()
+        # Shared Qt thread pool for background tasks (fallback if Qt not installed)
+        if QThreadPool is not None:
+            self.thread_pool = QThreadPool.globalInstance()
+        else:  # pragma: no cover
+            self.thread_pool = self._ThreadPoolFallback()
 
     def shutdown(self) -> None:
         """
