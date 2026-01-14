@@ -36,17 +36,35 @@ class FileFilterProxyModel(QSortFilterProxyModel):
         self.setDynamicSortFilter(True)
         self.setSortRole(Qt.ItemDataRole.UserRole)
 
+    def _invalidate(self) -> None:
+        """Request the proxy to re-evaluate its row filter.
+
+        Qt 6.13+ deprecates invalidateFilter()/invalidateRowsFilter(). The
+        recommended API is beginFilterChange()/endFilterChange(Direction.Rows).
+        """
+        if hasattr(self, "beginFilterChange") and hasattr(self, "endFilterChange"):
+            # Preferred in newer Qt/PySide6
+            self.beginFilterChange()  # type: ignore[attr-defined]
+            self.endFilterChange(QSortFilterProxyModel.Direction.Rows)  # type: ignore[attr-defined]
+            return
+
+        # Fallback for older Qt/PySide6
+        if hasattr(self, "invalidateRowsFilter"):
+            self.invalidateRowsFilter()  # type: ignore[attr-defined]
+        else:
+            self.invalidateFilter()
+
     def set_search_text(self, text: str) -> None:
         self._search_text = (text or "").strip().lower()
-        self.invalidateFilter()
+        self._invalidate()
 
     def set_storage_id(self, storage_id: Optional[int]) -> None:
         self._storage_id = storage_id
-        self.invalidateFilter()
+        self._invalidate()
 
     def set_integrity(self, integrity: Optional[str]) -> None:
         self._integrity = integrity
-        self.invalidateFilter()
+        self._invalidate()
 
     def filterAcceptsRow(self, source_row: int, source_parent) -> bool:  # noqa: N802
         model = self.sourceModel()
