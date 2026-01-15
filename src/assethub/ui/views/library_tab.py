@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Optional
 
-from PySide6.QtCore import QSortFilterProxyModel, Qt, Signal
+from PySide6.QtCore import QSortFilterProxyModel, Qt, Signal, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -13,7 +15,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
+    QSplitter,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -22,6 +26,7 @@ from PySide6.QtWidgets import (
 from assethub.context import AppContext
 from assethub.core.db.schema import initialize_schema
 from assethub.ui.models.file_table_model import FileRow, FileTableModel
+from assethub.ui.views.file_detail_pane import FileDetailPane, compute_absolute_path
 
 
 class FileFilterProxyModel(QSortFilterProxyModel):
@@ -115,6 +120,8 @@ class LibraryTab(QWidget):
         self.proxy = FileFilterProxyModel()
         self.proxy.setSourceModel(self.model)
 
+        self._selected_file_id: Optional[int] = None
+
         self._build_ui()
         self._wire_events()
         self.refresh()
@@ -146,18 +153,37 @@ class LibraryTab(QWidget):
         top.addWidget(self.btn_refresh)
         root.addLayout(top)
 
+        # Master–detail split view
+        self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
+
+        left = QWidget(self.splitter)
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+
         # Table
-        self.table = QTableView(self)
+        self.table = QTableView(left)
         self.table.setModel(self.proxy)
         self.table.setSortingEnabled(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.horizontalHeader().setStretchLastSection(True)
-        root.addWidget(self.table, stretch=1)
+        left_layout.addWidget(self.table, stretch=1)
 
-        # Footer
-        self.status_label = QLabel("", self)
-        root.addWidget(self.status_label)
+        # Footer (belongs with the table)
+        self.status_label = QLabel("", left)
+        left_layout.addWidget(self.status_label)
+
+        conn = self.context.db_connection
+        if conn is None:
+            raise RuntimeError("AppContext db_connection is not initialized")
+        self.detail_pane = FileDetailPane(conn, parent=self.splitter)
+
+        self.splitter.addWidget(left)
+        self.splitter.addWidget(self.detail_pane)
+        self.splitter.setStretchFactor(0, 3)
+        self.splitter.setStretchFactor(1, 2)
+
+        root.addWidget(self.splitter, stretch=1)
 
         self._apply_column_visibility()
         self._rebuild_filter_options(preserve_selection=False)
@@ -182,6 +208,10 @@ class LibraryTab(QWidget):
         if sel is not None:
             sel.selectionChanged.connect(self._on_selection_changed)
 
+        # Context menu on rows
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_context_menu_requested)
+
     def _on_search_changed(self, text: str) -> None:
         self.proxy.set_search_text(text)
         self._update_status_label()
@@ -192,6 +222,7 @@ class LibraryTab(QWidget):
 
     def refresh(self) -> None:
         """Reload the table from the database."""
+        prev_selected = self._selected_file_id
         conn = self.context.db_connection
         if conn is None:
             raise RuntimeError("AppContext db_connection is not initialized")
@@ -251,6 +282,14 @@ class LibraryTab(QWidget):
         self._rebuild_filter_options(preserve_selection=True)
         self._apply_column_visibility()
         self._update_status_label()
+
+        # Preserve selection by file_id if possible; otherwise clear detail pane.
+        if prev_selected is not None:
+            if not self._select_file_id(prev_selected):
+                self._selected_file_id = None
+                self.detail_pane.clear()
+        else:
+            self.detail_pane.clear()
 
     def _on_search_changed(self, text: str) -> None:
         self.proxy.set_search_text(text)
@@ -331,15 +370,83 @@ class LibraryTab(QWidget):
     # -----------------
 
     def _on_selection_changed(self, selected, _deselected) -> None:
-        if selected is None:
+        if selected is None or not selected.indexes():
+            self._selected_file_id = None
+            self.detail_pane.clear()
             return
-        if not selected.indexes():
-            return
+
         proxy_index = selected.indexes()[0]
         src_index = self.proxy.mapToSource(proxy_index)
         file_id = self.model.file_id_for_row(src_index.row())
-        if file_id is not None:
-            self.file_selected.emit(int(file_id))
+        if file_id is None:
+            self._selected_file_id = None
+            self.detail_pane.clear()
+            return
+
+        fid = int(file_id)
+        self._selected_file_id = fid
+        self.detail_pane.set_file_id(fid)
+        self.file_selected.emit(fid)
+
+    def _select_file_id(self, file_id: int) -> bool:
+        """Select a row in the proxy model by file_id, respecting current filters."""
+        target = int(file_id)
+        for src_row in range(self.model.rowCount()):
+            if self.model.file_id_for_row(src_row) == target:
+                src_index = self.model.index(src_row, 0)
+                proxy_index = self.proxy.mapFromSource(src_index)
+                if not proxy_index.isValid():
+                    return False
+                self.table.setCurrentIndex(proxy_index)
+                self.table.selectRow(proxy_index.row())
+                return True
+        return False
+
+    def _resolve_absolute_path(self, file_id: int) -> Optional[str]:
+        conn = self.context.db_connection
+        if conn is None:
+            return None
+        row = conn.execute(
+            """
+            SELECT storage.root_path, file.relative_path
+            FROM file
+            JOIN storage ON storage.id = file.storage_id
+            WHERE file.id = ?;
+            """,
+            (int(file_id),),
+        ).fetchone()
+        if not row:
+            return None
+        root_path, rel = row
+        return compute_absolute_path(None if root_path is None else str(root_path), str(rel))
+
+    def _on_context_menu_requested(self, pos) -> None:
+        idx = self.table.indexAt(pos)
+        if not idx.isValid():
+            return
+
+        # Select the row under the cursor.
+        self.table.selectRow(idx.row())
+
+        src_index = self.proxy.mapToSource(idx)
+        file_id = self.model.file_id_for_row(src_index.row())
+        if file_id is None:
+            return
+
+        abs_path = self._resolve_absolute_path(int(file_id))
+        if not abs_path:
+            return
+
+        menu = QMenu(self)
+
+        act_copy_abs = menu.addAction("Copy absolute path")
+        act_copy_abs.triggered.connect(lambda: FileDetailPane.copy_to_clipboard(abs_path))
+
+        folder = os.path.dirname(abs_path)
+        act_open = menu.addAction("Open in Explorer")
+        act_open.triggered.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(folder)))
+
+        menu.exec(self.table.viewport().mapToGlobal(pos))
 
     # -----------------
     # Status
