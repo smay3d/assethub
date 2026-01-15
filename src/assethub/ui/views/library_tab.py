@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import os
 from typing import Optional
 
-from PySide6.QtCore import QSortFilterProxyModel, Qt, Signal, QUrl
+from PySide6.QtCore import QSortFilterProxyModel, Qt, Signal, QUrl, QSettings
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -112,6 +112,8 @@ class LibraryTab(QWidget):
 
     CAP_ROWS = 10_000
 
+    _SETTINGS_KEY_HSPLIT = "ui/library/hsplitter_state"
+
     def __init__(self, context: AppContext) -> None:
         super().__init__()
         self.context = context
@@ -184,6 +186,10 @@ class LibraryTab(QWidget):
         self.splitter.setStretchFactor(1, 2)
 
         root.addWidget(self.splitter, stretch=1)
+
+        # Restore splitter state (if available), otherwise use default ratios.
+        self._restore_splitter_state()
+        self.splitter.splitterMoved.connect(lambda *_: self._save_splitter_state())
 
         self._apply_column_visibility()
         self._rebuild_filter_options(preserve_selection=False)
@@ -447,6 +453,36 @@ class LibraryTab(QWidget):
         act_open.triggered.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(folder)))
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+
+    # -----------------
+    # Splitter persistence
+    # -----------------
+
+    def _settings(self) -> QSettings:
+        return QSettings()
+
+    def _save_splitter_state(self) -> None:
+        try:
+            s = self._settings()
+            s.setValue(self._SETTINGS_KEY_HSPLIT, self.splitter.saveState())
+        except Exception:
+            return
+
+    def _restore_splitter_state(self) -> None:
+        try:
+            s = self._settings()
+            state = s.value(self._SETTINGS_KEY_HSPLIT)
+            if state:
+                ok = self.splitter.restoreState(state)
+                if ok:
+                    return
+        except Exception:
+            pass
+
+        # Fallback: default sizing based on current width.
+        w = max(1, int(self.width()))
+        self.splitter.setSizes([int(w * 0.6), int(w * 0.4)])
 
     # -----------------
     # Status

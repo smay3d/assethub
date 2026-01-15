@@ -9,14 +9,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSettings
 from PySide6.QtGui import QGuiApplication, QImageReader, QPixmap
 from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
-    QGroupBox,
     QLabel,
+    QToolButton,
     QSizePolicy,
+    QScrollArea,
+    QSplitter,
     QStackedLayout,
     QVBoxLayout,
     QWidget,
@@ -136,6 +138,7 @@ class FileDetailPane(QWidget):
         self._conn = conn
         self._current_file_id: Optional[int] = None
         self._current_details: Optional[FileDetails] = None
+        self._did_restore_splitters: bool = False
 
         self._build_ui()
         self.clear()
@@ -205,11 +208,21 @@ class FileDetailPane(QWidget):
         content_layout.setContentsMargins(0, 0, 0, 0)
         self._stack.addWidget(self._content)
 
-        # Preview container
+        # Vertical splitter inside the detail pane:
+        # top = preview, bottom = details (scrollable).
+        self._vsplit = QSplitter(Qt.Orientation.Vertical, self._content)
+        content_layout.addWidget(self._vsplit, stretch=1)
+
+        # -----------------
+        # Preview container (resizable via splitter handle)
+        # -----------------
         self._preview_frame = QFrame(self._content)
         self._preview_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        self._preview_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self._preview_frame.setMaximumHeight(340)
+        self._preview_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # Keep minimums modest so the main window can fit on smaller monitors.
+        self._preview_frame.setMinimumHeight(140)
+        self._preview_frame.setMinimumWidth(200)
+
         preview_layout = QVBoxLayout(self._preview_frame)
         preview_layout.setContentsMargins(6, 6, 6, 6)
 
@@ -225,20 +238,33 @@ class FileDetailPane(QWidget):
         self._preview_fallback.setEnabled(False)
         self._preview_stack.addWidget(self._preview_fallback)
 
-        content_layout.addWidget(self._preview_frame)
+        self._vsplit.addWidget(self._preview_frame)
+
+        # -----------------
+        # Details container (scrollable)
+        # -----------------
+        self._details_scroll = QScrollArea(self._content)
+        self._details_scroll.setWidgetResizable(True)
+        self._details_scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        self._details_host = QWidget(self._details_scroll)
+        self._details_scroll.setWidget(self._details_host)
+
+        details_layout = QVBoxLayout(self._details_host)
+        details_layout.setContentsMargins(0, 0, 0, 0)
 
         # Core fields
         self._core_form = QFormLayout()
         self._core_form.setContentsMargins(0, 8, 0, 0)
 
-        self._lbl_filename = QLabel("", self._content)
-        self._lbl_integrity = QLabel("", self._content)
-        self._lbl_storage = QLabel("", self._content)
-        self._lbl_root = QLabel("", self._content)
-        self._lbl_rel = QLabel("", self._content)
-        self._lbl_abs = QLabel("", self._content)
-        self._lbl_size = QLabel("", self._content)
-        self._lbl_mtime = QLabel("", self._content)
+        self._lbl_filename = QLabel("", self._details_host)
+        self._lbl_integrity = QLabel("", self._details_host)
+        self._lbl_storage = QLabel("", self._details_host)
+        self._lbl_root = QLabel("", self._details_host)
+        self._lbl_rel = QLabel("", self._details_host)
+        self._lbl_abs = QLabel("", self._details_host)
+        self._lbl_size = QLabel("", self._details_host)
+        self._lbl_mtime = QLabel("", self._details_host)
 
         for w in [
             self._lbl_storage,
@@ -247,6 +273,22 @@ class FileDetailPane(QWidget):
             self._lbl_abs,
         ]:
             w.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        # Prevent long paths from expanding the splitter: wrap value labels.
+        for w in [
+            self._lbl_filename,
+            self._lbl_integrity,
+            self._lbl_storage,
+            self._lbl_root,
+            self._lbl_rel,
+            self._lbl_abs,
+            self._lbl_size,
+            self._lbl_mtime,
+        ]:
+            w.setWordWrap(True)
+            w.setMinimumWidth(0)
+            w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            w.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
         self._core_form.addRow("Filename:", self._lbl_filename)
         self._core_form.addRow("Integrity:", self._lbl_integrity)
@@ -257,21 +299,41 @@ class FileDetailPane(QWidget):
         self._core_form.addRow("Size:", self._lbl_size)
         self._core_form.addRow("Modified:", self._lbl_mtime)
 
-        content_layout.addLayout(self._core_form)
+        details_layout.addLayout(self._core_form)
 
-        # Advanced section (collapsible via checkable groupbox)
-        self._advanced_group = QGroupBox("Advanced", self._content)
-        self._advanced_group.setCheckable(True)
-        self._advanced_group.setChecked(False)
-        adv_form = QFormLayout(self._advanced_group)
+        # Advanced section (collapsible)
+        self._adv_toggle = QToolButton(self._details_host)
+        self._adv_toggle.setText("Advanced")
+        self._adv_toggle.setCheckable(True)
+        self._adv_toggle.setChecked(False)
+        self._adv_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self._adv_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+
+        self._adv_container = QWidget(self._details_host)
+        self._adv_container.setVisible(False)
+        adv_form = QFormLayout(self._adv_container)
         adv_form.setContentsMargins(8, 8, 8, 8)
 
-        self._adv_file_id = QLabel("", self._advanced_group)
-        self._adv_storage_id = QLabel("", self._advanced_group)
-        self._adv_version_id = QLabel("", self._advanced_group)
-        self._adv_size_bytes = QLabel("", self._advanced_group)
-        self._adv_mtime_unix = QLabel("", self._advanced_group)
-        self._adv_created = QLabel("", self._advanced_group)
+        self._adv_file_id = QLabel("", self._adv_container)
+        self._adv_storage_id = QLabel("", self._adv_container)
+        self._adv_version_id = QLabel("", self._adv_container)
+        self._adv_size_bytes = QLabel("", self._adv_container)
+        self._adv_mtime_unix = QLabel("", self._adv_container)
+        self._adv_created = QLabel("", self._adv_container)
+
+        for w in [
+            self._adv_file_id,
+            self._adv_storage_id,
+            self._adv_version_id,
+            self._adv_size_bytes,
+            self._adv_mtime_unix,
+            self._adv_created,
+        ]:
+            w.setWordWrap(True)
+            w.setMinimumWidth(0)
+            w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            w.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            w.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
         adv_form.addRow("file.id:", self._adv_file_id)
         adv_form.addRow("storage_id:", self._adv_storage_id)
@@ -280,8 +342,66 @@ class FileDetailPane(QWidget):
         adv_form.addRow("mtime_unix:", self._adv_mtime_unix)
         adv_form.addRow("created_at:", self._adv_created)
 
-        content_layout.addWidget(self._advanced_group)
-        content_layout.addStretch(1)
+        def _on_adv_toggled(checked: bool) -> None:
+            self._adv_container.setVisible(checked)
+            self._adv_toggle.setArrowType(
+                Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow
+            )
+
+        self._adv_toggle.toggled.connect(_on_adv_toggled)
+
+        details_layout.addWidget(self._adv_toggle)
+        details_layout.addWidget(self._adv_container)
+        details_layout.addStretch(1)
+
+        self._vsplit.addWidget(self._details_scroll)
+
+        # Default splitter sizing (preview ~40%, details ~60%)
+        self._vsplit.setStretchFactor(0, 2)
+        self._vsplit.setStretchFactor(1, 3)
+
+        # Persist splitter state.
+        self._vsplit.splitterMoved.connect(lambda *_: self._save_splitter_state())
+
+
+    # -----------------
+    # Splitter persistence
+    # -----------------
+
+    _SETTINGS_KEY_VSPLIT = "ui/library/detail_pane/vsplitter_state"
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if not self._did_restore_splitters:
+            self._restore_splitter_state()
+            self._did_restore_splitters = True
+
+    def _settings(self) -> QSettings:
+        # Uses the application’s organization/app name if set; otherwise a local default store.
+        return QSettings()
+
+    def _save_splitter_state(self) -> None:
+        try:
+            s = self._settings()
+            s.setValue(self._SETTINGS_KEY_VSPLIT, self._vsplit.saveState())
+        except Exception:
+            # Persistence should never break the UI.
+            return
+
+    def _restore_splitter_state(self) -> None:
+        try:
+            s = self._settings()
+            state = s.value(self._SETTINGS_KEY_VSPLIT)
+            if state:
+                ok = self._vsplit.restoreState(state)
+                if ok:
+                    return
+        except Exception:
+            pass
+
+        # Fallback default sizing based on current widget height.
+        h = max(1, int(self.height()))
+        self._vsplit.setSizes([int(h * 0.4), int(h * 0.6)])
 
     # -----------------
     # Data loading
