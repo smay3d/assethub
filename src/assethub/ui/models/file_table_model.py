@@ -8,6 +8,15 @@ from typing import Any, Callable, List, Optional
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 
+from assethub.ui.ui_constants import DEFAULT_VISIBLE_FILE_COLUMNS
+
+
+_DEFAULT_VISIBLE_HEADERS = set(DEFAULT_VISIBLE_FILE_COLUMNS)
+
+
+def _is_default_visible(header: str) -> bool:
+    return header in _DEFAULT_VISIBLE_HEADERS
+
 
 @dataclass(frozen=True)
 class FileRow:
@@ -96,42 +105,42 @@ class FileTableModel(QAbstractTableModel):
             _Column(
                 key="storage_name",
                 header="Storage",
-                default_visible=True,
+                default_visible=_is_default_visible("Storage"),
                 display=lambda r: r.storage_name,
                 sort_value=lambda r: r.storage_name.lower(),
             ),
             _Column(
                 key="filename",
                 header="Filename",
-                default_visible=True,
+                default_visible=_is_default_visible("Filename"),
                 display=lambda r: r.filename,
                 sort_value=lambda r: r.filename.lower(),
             ),
             _Column(
                 key="relative_path",
                 header="Relative Path",
-                default_visible=True,
+                default_visible=_is_default_visible("Relative Path"),
                 display=lambda r: r.relative_path,
                 sort_value=lambda r: r.relative_path.lower(),
             ),
             _Column(
                 key="size_human",
                 header="Size",
-                default_visible=True,
+                default_visible=_is_default_visible("Size"),
                 display=lambda r: _fmt_size(r.size_bytes),
                 sort_value=lambda r: -1 if r.size_bytes is None else int(r.size_bytes),
             ),
             _Column(
                 key="mtime_human",
                 header="Modified",
-                default_visible=True,
+                default_visible=_is_default_visible("Modified"),
                 display=lambda r: _fmt_mtime(r.mtime_unix),
                 sort_value=lambda r: -1.0 if r.mtime_unix is None else float(r.mtime_unix),
             ),
             _Column(
                 key="integrity_state",
                 header="Integrity",
-                default_visible=True,
+                default_visible=_is_default_visible("Integrity"),
                 display=lambda r: r.integrity_state,
                 sort_value=lambda r: r.integrity_state.lower(),
             ),

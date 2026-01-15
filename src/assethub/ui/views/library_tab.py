@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from assethub.context import AppContext
 from assethub.core.db.schema import initialize_schema
 from assethub.ui.models.file_table_model import FileRow, FileTableModel
+from assethub.ui.ui_constants import LIBRARY_CAP_ROWS
 from assethub.ui.views.file_detail_pane import FileDetailPane, compute_absolute_path
 
 
@@ -110,7 +111,7 @@ class LibraryTab(QWidget):
 
     file_selected = Signal(int)  # file_id
 
-    CAP_ROWS = 10_000
+    CAP_ROWS = LIBRARY_CAP_ROWS
 
     _SETTINGS_KEY_HSPLIT = "ui/library/hsplitter_state"
 

@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 
-SUPPORTED_PREVIEW_FORMATS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
+from assethub.ui.ui_constants import PREVIEW_MAX_PIXEL_AREA, SUPPORTED_PREVIEW_FORMATS
 SUPPORTED_PREVIEW_TEXT = (
     "Preview unavailable. Supported formats: "
     + " ".join(SUPPORTED_PREVIEW_FORMATS)
@@ -87,7 +87,7 @@ class _ImagePreviewLabel(QLabel):
     """A QLabel that rescales a stored pixmap to its current size."""
 
     # Cap decoded/displayed pixels to ~1/4 of 1440p (2560*1440*0.25 ≈ 921,600).
-    MAX_PIXEL_AREA = 921_600
+    MAX_PIXEL_AREA = PREVIEW_MAX_PIXEL_AREA
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
