@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from assethub import __version__
 from assethub.context import AppContext
+from assethub.core.events.event_hub import DbChanged, ScanFinished, HealthFinished
 from assethub.ui.ui_constants import (
     DEFAULT_VISIBLE_FILE_COLUMNS,
     LIBRARY_CAP_ROWS,
@@ -73,8 +74,45 @@ class SettingsTab(QWidget):
         super().__init__()
         self.context = context
 
+        # Stage 7.5: subscribe to central events so settings stays current.
+        self._unsub_db_changed = self.context.event_hub.db_changed.subscribe(self._on_db_changed)
+        self._unsub_scan_finished = self.context.event_hub.scan_finished.subscribe(self._on_scan_finished)
+        self._unsub_health_finished = self.context.event_hub.health_finished.subscribe(self._on_health_finished)
+
         self._build_ui()
         self.refresh()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        # Avoid dangling references in the EventHub.
+        for unsub in [
+            getattr(self, "_unsub_db_changed", None),
+            getattr(self, "_unsub_scan_finished", None),
+            getattr(self, "_unsub_health_finished", None),
+        ]:
+            try:
+                if unsub:
+                    unsub()
+            except Exception:
+                pass
+        super().closeEvent(event)
+
+    def _on_db_changed(self, _evt: DbChanged) -> None:
+        try:
+            self.refresh()
+        except Exception:
+            return
+
+    def _on_scan_finished(self, _evt: ScanFinished) -> None:
+        try:
+            self.refresh()
+        except Exception:
+            return
+
+    def _on_health_finished(self, _evt: HealthFinished) -> None:
+        try:
+            self.refresh()
+        except Exception:
+            return
 
     # -----------------
     # UI

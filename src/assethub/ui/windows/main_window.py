@@ -43,13 +43,8 @@ class MainWindow(QMainWindow):
         self.settings_tab = SettingsTab(self.context)
         self.tabs.addTab(self.settings_tab, "Settings")
 
-        # Refresh Library after scans/health checks.
-        self.scan_tab.scan_completed.connect(self.library_tab.refresh)
-        self.scan_tab.health_completed.connect(self.library_tab.refresh)
-
-        # Keep Settings current when system state changes.
-        self.scan_tab.scan_completed.connect(self.settings_tab.refresh)
-        self.scan_tab.health_completed.connect(self.settings_tab.refresh)
+        # Stage 7.5: refresh is now driven by AppContext.event_hub subscriptions
+        # inside each view.
 
         # Auto-refresh Settings whenever user enters the tab.
         self.tabs.currentChanged.connect(self._on_tab_changed)

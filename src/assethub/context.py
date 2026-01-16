@@ -17,6 +17,7 @@ from .core.scanner.scanner import Scanner
 from .core.previews.manager import PreviewManager
 from .core.sidecar.manager import SidecarManager
 from .core.health.checker import HealthChecker
+from .core.events.event_hub import EventHub
 from .core.db.connection import get_connection
 from .core.db.schema import initialize_schema
 
@@ -53,6 +54,9 @@ class AppContext:
     """
 
     config: AppConfig
+
+    # Stage 7.5: central non-Qt signaling
+    event_hub: EventHub = field(default_factory=EventHub)
 
     # Core subsystems:
     db_connection: Optional[Any] = None

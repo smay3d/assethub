@@ -6,8 +6,8 @@ from dataclasses import dataclass
 import os
 from typing import Optional
 
-from PySide6.QtCore import QSortFilterProxyModel, Qt, Signal, QUrl, QSettings
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QItemSelectionModel, QSortFilterProxyModel, Qt, Signal, QSettings
+from PySide6.QtWidgets import QMessageBox
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -28,6 +28,8 @@ from assethub.core.db.schema import initialize_schema
 from assethub.ui.models.file_table_model import FileRow, FileTableModel
 from assethub.ui.ui_constants import LIBRARY_CAP_ROWS
 from assethub.ui.views.file_detail_pane import FileDetailPane, compute_absolute_path
+from assethub.core.events.event_hub import DbChanged
+from assethub.ui.actions.library_actions import LibraryActions
 
 
 class FileFilterProxyModel(QSortFilterProxyModel):
@@ -123,11 +125,39 @@ class LibraryTab(QWidget):
         self.proxy = FileFilterProxyModel()
         self.proxy.setSourceModel(self.model)
 
-        self._selected_file_id: Optional[int] = None
+        # Stage 7.5.2: multi-selection support
+        # - selected set drives summary/actions
+        # - current row drives preview ("last interacted")
+        self._selected_file_ids: list[int] = []
+        self._selected_file_rows: list[FileRow] = []
+        self._current_file_id: Optional[int] = None
+        self._is_restoring_selection: bool = False
+        self._unsub_db_changed = self.context.event_hub.db_changed.subscribe(self._on_db_changed)
+
+        self._is_restoring_selection: bool = False
 
         self._build_ui()
         self._wire_events()
+
+        # Stage 7.5.3: centralized, reusable list actions
+        self._actions = LibraryActions(self.context, parent=self)
         self.refresh()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        # Avoid dangling references in the EventHub.
+        try:
+            if self._unsub_db_changed:
+                self._unsub_db_changed()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+    def _on_db_changed(self, _evt: DbChanged) -> None:
+        """Stage 7.5: keep the library list current when DB changes."""
+        try:
+            self.refresh()
+        except Exception:
+            return
 
     # -----------------
     # UI
@@ -168,7 +198,8 @@ class LibraryTab(QWidget):
         self.table.setModel(self.proxy)
         self.table.setSortingEnabled(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # Stage 7.5.2: standard desktop multi-select
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.horizontalHeader().setStretchLastSection(True)
         left_layout.addWidget(self.table, stretch=1)
 
@@ -210,10 +241,11 @@ class LibraryTab(QWidget):
         self.proxy.rowsRemoved.connect(lambda *_: self._update_status_label())
         self.proxy.layoutChanged.connect(self._update_status_label)
 
-        # Selection -> emit file_id
+        # Stage 7.5.2: current row drives preview; selected set drives summary/actions.
         sel = self.table.selectionModel()
         if sel is not None:
             sel.selectionChanged.connect(self._on_selection_changed)
+            sel.currentChanged.connect(self._on_current_changed)
 
         # Context menu on rows
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -229,7 +261,8 @@ class LibraryTab(QWidget):
 
     def refresh(self) -> None:
         """Reload the table from the database."""
-        prev_selected = self._selected_file_id
+        prev_selected_ids = list(self._selected_file_ids)
+        prev_current_id = self._current_file_id
         conn = self.context.db_connection
         if conn is None:
             raise RuntimeError("AppContext db_connection is not initialized")
@@ -290,13 +323,11 @@ class LibraryTab(QWidget):
         self._apply_column_visibility()
         self._update_status_label()
 
-        # Preserve selection by file_id if possible; otherwise clear detail pane.
-        if prev_selected is not None:
-            if not self._select_file_id(prev_selected):
-                self._selected_file_id = None
-                self.detail_pane.clear()
-        else:
-            self.detail_pane.clear()
+        # Preserve selection + current by file_id if possible.
+        self._restore_selection(prev_selected_ids, prev_current_id)
+
+        # Ensure detail pane reflects restored selection.
+        self._sync_detail_pane()
 
     def _on_search_changed(self, text: str) -> None:
         self.proxy.set_search_text(text)
@@ -376,38 +407,114 @@ class LibraryTab(QWidget):
     # Selection
     # -----------------
 
-    def _on_selection_changed(self, selected, _deselected) -> None:
-        if selected is None or not selected.indexes():
-            self._selected_file_id = None
+    def _on_selection_changed(self, _selected, _deselected) -> None:
+        if self._is_restoring_selection:
+            return
+        self._sync_detail_pane()
+
+    def _on_current_changed(self, _current, _previous) -> None:
+        if self._is_restoring_selection:
+            return
+        self._sync_detail_pane()
+
+    def _sync_detail_pane(self) -> None:
+        """Update detail pane based on current row + selected set.
+
+        Stage 7.5.2 behavior:
+        - Preview always follows current row (last interacted)
+        - If multiple selected, show a selection summary below the preview
+        """
+        sel = self.table.selectionModel()
+        if sel is None:
+            self._selected_file_ids = []
+            self._current_file_id = None
             self.detail_pane.clear()
             return
 
-        proxy_index = selected.indexes()[0]
-        src_index = self.proxy.mapToSource(proxy_index)
-        file_id = self.model.file_id_for_row(src_index.row())
-        if file_id is None:
-            self._selected_file_id = None
+        # Selected rows (proxy indices, column 0)
+        selected_rows = sel.selectedRows(0)
+        selected_file_ids: list[int] = []
+        selected_file_rows: list[FileRow] = []
+        for pidx in selected_rows:
+            src = self.proxy.mapToSource(pidx)
+            fid = self.model.file_id_for_row(src.row())
+            if fid is None:
+                continue
+            row = self.model.row_data(src.row())
+            if row is None:
+                continue
+            selected_file_ids.append(int(fid))
+            selected_file_rows.append(row)
+
+        # Current row drives preview
+        current_fid: Optional[int] = None
+        cidx = sel.currentIndex()
+        if cidx.isValid():
+            src = self.proxy.mapToSource(cidx)
+            fid = self.model.file_id_for_row(src.row())
+            current_fid = None if fid is None else int(fid)
+
+        # Fallback: if nothing current but something selected, pick last selected
+        if current_fid is None and selected_file_ids:
+            current_fid = selected_file_ids[-1]
+
+        self._selected_file_ids = selected_file_ids
+        self._selected_file_rows = selected_file_rows
+        self._current_file_id = current_fid
+
+        if not selected_file_ids or current_fid is None:
             self.detail_pane.clear()
             return
 
-        fid = int(file_id)
-        self._selected_file_id = fid
-        self.detail_pane.set_file_id(fid)
-        self.file_selected.emit(fid)
+        summary = FileDetailPane.compute_selection_summary(selected_file_rows)
+        self.detail_pane.set_selection(current_file_id=current_fid, selected_file_ids=selected_file_ids, summary=summary)
+        self.file_selected.emit(int(current_fid))
 
-    def _select_file_id(self, file_id: int) -> bool:
-        """Select a row in the proxy model by file_id, respecting current filters."""
+    def _restore_selection(self, selected_ids: list[int], current_id: Optional[int]) -> None:
+        """Restore selection/current after a refresh, best-effort."""
+        sel = self.table.selectionModel()
+        if sel is None:
+            return
+
+        self._is_restoring_selection = True
+        try:
+            sel.clearSelection()
+
+            # Re-select rows that still exist and pass current filters.
+            restored_current_proxy = None
+            for fid in selected_ids:
+                pidx = self._proxy_index_for_file_id(fid)
+                if pidx is None:
+                    continue
+                sel.select(pidx, QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+                if current_id is not None and int(fid) == int(current_id):
+                    restored_current_proxy = pidx
+
+            # Restore current row (preview driver)
+            if restored_current_proxy is None and current_id is not None:
+                restored_current_proxy = self._proxy_index_for_file_id(int(current_id))
+
+            if restored_current_proxy is not None:
+                self.table.setCurrentIndex(restored_current_proxy)
+                # Ensure the current row is visible
+                try:
+                    self.table.scrollTo(restored_current_proxy)
+                except Exception:
+                    pass
+        finally:
+            self._is_restoring_selection = False
+
+    def _proxy_index_for_file_id(self, file_id: int) -> Optional[object]:
+        """Return a proxy QModelIndex for a given file_id if visible under current filters."""
         target = int(file_id)
         for src_row in range(self.model.rowCount()):
             if self.model.file_id_for_row(src_row) == target:
                 src_index = self.model.index(src_row, 0)
-                proxy_index = self.proxy.mapFromSource(src_index)
-                if not proxy_index.isValid():
-                    return False
-                self.table.setCurrentIndex(proxy_index)
-                self.table.selectRow(proxy_index.row())
-                return True
-        return False
+                pidx = self.proxy.mapFromSource(src_index)
+                if pidx.isValid():
+                    return pidx
+                return None
+        return None
 
     def _resolve_absolute_path(self, file_id: int) -> Optional[str]:
         conn = self.context.db_connection
@@ -432,26 +539,75 @@ class LibraryTab(QWidget):
         if not idx.isValid():
             return
 
-        # Select the row under the cursor.
-        self.table.selectRow(idx.row())
+        # Stage 7.5.2: don't destroy multi-selection when right-clicking.
+        # If the row is not already selected, replace selection with that row.
+        sel = self.table.selectionModel()
+        if sel is not None:
+            if not sel.isRowSelected(idx.row(), idx.parent()):
+                sel.select(idx, QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows)
+            self.table.setCurrentIndex(idx)
 
-        src_index = self.proxy.mapToSource(idx)
-        file_id = self.model.file_id_for_row(src_index.row())
-        if file_id is None:
+        # Build menu based on current selection snapshot.
+        selected_ids = list(self._selected_file_ids)
+        current_id = self._current_file_id
+        selected_rows = list(self._selected_file_rows)
+
+        if not selected_ids:
             return
 
-        abs_path = self._resolve_absolute_path(int(file_id))
-        if not abs_path:
-            return
+        all_missing = all(str(r.integrity_state).upper() == "MISSING" for r in selected_rows) and bool(selected_rows)
 
         menu = QMenu(self)
 
-        act_copy_abs = menu.addAction("Copy absolute path")
-        act_copy_abs.triggered.connect(lambda: FileDetailPane.copy_to_clipboard(abs_path))
+        act_open_file = menu.addAction("Open file with system default")
+        act_open_file.triggered.connect(lambda: self._actions.open_file_with_default(current_id))
 
-        folder = os.path.dirname(abs_path)
-        act_open = menu.addAction("Open in Explorer")
-        act_open.triggered.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(folder)))
+        act_reveal = menu.addAction("Open file location (reveal in Explorer)")
+        act_reveal.triggered.connect(lambda: self._actions.reveal_in_explorer(current_id))
+
+        act_open_root = menu.addAction("Open storage root location")
+        act_open_root.triggered.connect(lambda: self._actions.open_storage_root_location(current_id))
+
+        menu.addSeparator()
+
+        copy_menu = menu.addMenu("Copy")
+        act_c_name = copy_menu.addAction("Copy file name")
+        act_c_name.triggered.connect(lambda: self._actions.copy_file_names(selected_ids))
+
+        act_c_abs_dir = copy_menu.addAction("Copy absolute path (file name excluded)")
+        act_c_abs_dir.triggered.connect(lambda: self._actions.copy_abs_dirs(selected_ids))
+
+        act_c_rel_dir = copy_menu.addAction("Copy relative path (file name excluded)")
+        act_c_rel_dir.triggered.connect(lambda: self._actions.copy_rel_dirs(selected_ids))
+
+        act_c_checksum = copy_menu.addAction("Copy checksum")
+        act_c_checksum.triggered.connect(lambda: self._actions.copy_checksums_sha256(selected_ids))
+
+        menu.addSeparator()
+
+        act_health = menu.addAction("Run health check")
+        act_health.triggered.connect(lambda: self._actions.run_health_check(selected_ids))
+
+        act_remove = menu.addAction("Remove from database")
+        act_remove.setEnabled(all_missing)
+
+        def _do_remove() -> None:
+            if not all_missing:
+                return
+            resp = QMessageBox.question(
+                self,
+                "Remove from database",
+                f"Remove {len(selected_ids)} missing record(s) from the database?\n\n"
+                "This does not delete files from disk.",
+            )
+            if resp != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                self._actions.remove_missing_from_database(selected_ids)
+            except Exception:
+                return
+
+        act_remove.triggered.connect(_do_remove)
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
 

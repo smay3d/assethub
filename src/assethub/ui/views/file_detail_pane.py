@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 
 
 from assethub.ui.ui_constants import PREVIEW_MAX_PIXEL_AREA, SUPPORTED_PREVIEW_FORMATS
+from assethub.ui.models.file_table_model import FileRow
 SUPPORTED_PREVIEW_TEXT = (
     "Preview unavailable. Supported formats: "
     + " ".join(SUPPORTED_PREVIEW_FORMATS)
@@ -49,6 +50,14 @@ class FileDetails:
     created_at: str
 
     absolute_path: Optional[str]
+
+
+@dataclass(frozen=True)
+class SelectionSummary:
+    selected_count: int
+    total_size_bytes: int
+    integrity_counts: dict[str, int]
+    storage_counts: dict[str, int]
 
 
 def _fmt_size(size_bytes: Optional[int]) -> str:
@@ -158,11 +167,76 @@ class FileDetailPane(QWidget):
     def clear(self) -> None:
         self._current_file_id = None
         self._current_details = None
+        try:
+            self._bottom_stack.setCurrentWidget(self._details_scroll)
+        except Exception:
+            pass
         self._stack.setCurrentWidget(self._empty)
 
     def set_file_id(self, file_id: int) -> None:
         self._current_file_id = int(file_id)
         self.refresh()
+
+    # Stage 7.5.2 API
+    def set_selection(self, *, current_file_id: int, selected_file_ids: list[int], summary: SelectionSummary) -> None:
+        """Drive the detail pane from Library selection state.
+
+        - Preview follows the current row (last interacted).
+        - If multiple files are selected, show a selection summary below the preview.
+        """
+        if not selected_file_ids:
+            self.clear()
+            return
+
+        self._stack.setCurrentWidget(self._content)
+        self._current_file_id = int(current_file_id)
+
+        details = self._load_details(self._current_file_id)
+        self._current_details = details
+
+        if summary.selected_count <= 1:
+            if details is None:
+                self.clear()
+                return
+            self._bottom_stack.setCurrentWidget(self._details_scroll)
+            self._render(details)
+            return
+
+        # Multi-select mode: preview shows current file; bottom shows selection summary
+        if details is None:
+            self._preview_image.set_original_pixmap(None)
+            self._preview_stack.setCurrentWidget(self._preview_fallback)
+        else:
+            self._render_preview(details)
+
+        self._bottom_stack.setCurrentWidget(self._summary_scroll)
+        self._render_summary(summary)
+
+    @staticmethod
+    def compute_selection_summary(rows: list[FileRow]) -> SelectionSummary:
+        integrity_counts: dict[str, int] = {}
+        storage_counts: dict[str, int] = {}
+        total_size = 0
+
+        for r in rows:
+            st = str(r.integrity_state or "").upper()
+            integrity_counts[st] = integrity_counts.get(st, 0) + 1
+
+            sn = str(r.storage_name or "")
+            storage_counts[sn] = storage_counts.get(sn, 0) + 1
+
+            if r.size_bytes is not None:
+                try:
+                    total_size += int(r.size_bytes)
+                except Exception:
+                    pass
+
+        return SelectionSummary(
+            selected_count=len(rows),
+            total_size_bytes=int(total_size),
+            integrity_counts=integrity_counts,
+            storage_counts=storage_counts,
+        )
 
     def refresh(self) -> None:
         if self._current_file_id is None:
@@ -241,9 +315,16 @@ class FileDetailPane(QWidget):
         self._vsplit.addWidget(self._preview_frame)
 
         # -----------------
-        # Details container (scrollable)
+        # Bottom container (details vs selection summary)
         # -----------------
-        self._details_scroll = QScrollArea(self._content)
+        self._bottom_container = QWidget(self._content)
+        self._bottom_stack = QStackedLayout()
+        self._bottom_container.setLayout(self._bottom_stack)
+
+        # -----------------
+        # Single-file details (scrollable)
+        # -----------------
+        self._details_scroll = QScrollArea(self._bottom_container)
         self._details_scroll.setWidgetResizable(True)
         self._details_scroll.setFrameShape(QFrame.Shape.NoFrame)
 
@@ -354,7 +435,47 @@ class FileDetailPane(QWidget):
         details_layout.addWidget(self._adv_container)
         details_layout.addStretch(1)
 
-        self._vsplit.addWidget(self._details_scroll)
+        self._bottom_stack.addWidget(self._details_scroll)
+
+        # -----------------
+        # Multi-selection summary (scrollable)
+        # -----------------
+        self._summary_scroll = QScrollArea(self._bottom_container)
+        self._summary_scroll.setWidgetResizable(True)
+        self._summary_scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        self._summary_host = QWidget(self._summary_scroll)
+        self._summary_scroll.setWidget(self._summary_host)
+        summary_layout = QVBoxLayout(self._summary_host)
+        summary_layout.setContentsMargins(0, 8, 0, 0)
+
+        self._summary_form = QFormLayout()
+        self._summary_form.setContentsMargins(0, 0, 0, 0)
+
+        self._sel_count = QLabel("", self._summary_host)
+        self._sel_total_size = QLabel("", self._summary_host)
+        self._sel_integrity = QLabel("", self._summary_host)
+        self._sel_storage = QLabel("", self._summary_host)
+
+        for w in [self._sel_count, self._sel_total_size, self._sel_integrity, self._sel_storage]:
+            w.setWordWrap(True)
+            w.setMinimumWidth(0)
+            w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            w.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            w.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        self._summary_form.addRow("Selected:", self._sel_count)
+        self._summary_form.addRow("Total size:", self._sel_total_size)
+        self._summary_form.addRow("Integrity:", self._sel_integrity)
+        self._summary_form.addRow("Storage:", self._sel_storage)
+
+        summary_layout.addLayout(self._summary_form)
+        summary_layout.addStretch(1)
+
+        self._bottom_stack.addWidget(self._summary_scroll)
+
+        # Add bottom stack container to splitter
+        self._vsplit.addWidget(self._bottom_container)
 
         # Default splitter sizing (preview ~40%, details ~60%)
         self._vsplit.setStretchFactor(0, 2)
@@ -511,6 +632,35 @@ class FileDetailPane(QWidget):
 
         self._preview_image.set_original_pixmap(pix)
         self._preview_stack.setCurrentWidget(self._preview_image)
+
+    def _render_summary(self, s: SelectionSummary) -> None:
+        self._sel_count.setText(str(int(s.selected_count)))
+        self._sel_total_size.setText(_fmt_size(int(s.total_size_bytes)))
+        self._sel_integrity.setText(self._fmt_counts(s.integrity_counts, preferred_order=["OK", "MISSING", "UNRESOLVED"]))
+        # Storage names can be arbitrary; sort descending by count, then name
+        self._sel_storage.setText(self._fmt_counts(s.storage_counts, sort_by_count=True))
+
+    @staticmethod
+    def _fmt_counts(
+        counts: dict[str, int],
+        *,
+        preferred_order: Optional[list[str]] = None,
+        sort_by_count: bool = False,
+    ) -> str:
+        if not counts:
+            return ""
+
+        items = list(counts.items())
+
+        if preferred_order:
+            order = {k: i for i, k in enumerate(preferred_order)}
+            items.sort(key=lambda kv: (order.get(str(kv[0]).upper(), 999), str(kv[0]).lower()))
+        elif sort_by_count:
+            items.sort(key=lambda kv: (-int(kv[1]), str(kv[0]).lower()))
+        else:
+            items.sort(key=lambda kv: str(kv[0]).lower())
+
+        return "\n".join([f"{k}: {int(v)}" for k, v in items])
 
     @classmethod
     def _load_capped_pixmap(cls, path: str) -> Optional[QPixmap]:

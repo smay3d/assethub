@@ -38,6 +38,8 @@ class HealthChecker:
     def __init__(self, conn: sqlite3.Connection, storage_manager: StorageManager) -> None:
         self._conn = conn
         self._storage = storage_manager
+        # Set by the last run of `check_all_files()`.
+        self.last_changed_count: int = 0
 
     def check_all_files(self, *, cancel_check: Optional[Callable[[], bool]] = None) -> List[HealthResult]:
         """Check all indexed files and update their integrity_state.
@@ -47,11 +49,12 @@ class HealthChecker:
         storage_by_id: Dict[int, StorageRoot] = {s.id: s for s in self._storage.list_roots()}
 
         rows = self._conn.execute(
-            "SELECT id, storage_id, relative_path FROM file ORDER BY id;"
+            "SELECT id, storage_id, relative_path, integrity_state FROM file ORDER BY id;"
         ).fetchall()
 
         results: List[HealthResult] = []
         updates: List[Tuple[str, int]] = []
+        changed = 0
 
         def _should_cancel() -> bool:
             if cancel_check is None:
@@ -61,7 +64,7 @@ class HealthChecker:
             except Exception:
                 return False
 
-        for file_id, storage_id, rel in rows:
+        for file_id, storage_id, rel, old_state in rows:
             if _should_cancel():
                 break
             file_id_i = int(file_id)
@@ -77,7 +80,9 @@ class HealthChecker:
                 new_state = self.STATE_OK if os.path.exists(abs_path) else self.STATE_MISSING
 
             results.append(HealthResult(file_id=file_id_i, new_state=new_state))
-            updates.append((new_state, file_id_i))
+            if str(old_state).upper() != str(new_state).upper():
+                updates.append((new_state, file_id_i))
+                changed += 1
 
         # Apply updates in one batch (for processed rows).
         if updates:
@@ -87,6 +92,72 @@ class HealthChecker:
             )
             self._conn.commit()
 
+        self.last_changed_count = int(changed)
+
+        return results
+
+    def check_files(
+        self,
+        file_ids: List[int],
+        *,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> List[HealthResult]:
+        """Check only the specified file ids.
+
+        This is used by Stage 7.5.3 selection-targeted actions.
+        """
+        ids = [int(x) for x in file_ids]
+        if not ids:
+            self.last_changed_count = 0
+            return []
+
+        storage_by_id: Dict[int, StorageRoot] = {s.id: s for s in self._storage.list_roots()}
+
+        placeholders = ",".join(["?"] * len(ids))
+        rows = self._conn.execute(
+            f"SELECT id, storage_id, relative_path, integrity_state FROM file WHERE id IN ({placeholders}) ORDER BY id;",
+            tuple(ids),
+        ).fetchall()
+
+        results: List[HealthResult] = []
+        updates: List[Tuple[str, int]] = []
+        changed = 0
+
+        def _should_cancel() -> bool:
+            if cancel_check is None:
+                return False
+            try:
+                return bool(cancel_check())
+            except Exception:
+                return False
+
+        for file_id, storage_id, rel, old_state in rows:
+            if _should_cancel():
+                break
+            file_id_i = int(file_id)
+            storage_id_i = int(storage_id)
+            rel_s = str(rel)
+
+            storage = storage_by_id.get(storage_id_i)
+            if storage is None or storage.root_path is None:
+                new_state = self.STATE_UNRESOLVED
+            else:
+                abs_path = self._build_abs_path(storage.root_path, rel_s)
+                new_state = self.STATE_OK if os.path.exists(abs_path) else self.STATE_MISSING
+
+            results.append(HealthResult(file_id=file_id_i, new_state=new_state))
+            if str(old_state).upper() != str(new_state).upper():
+                updates.append((new_state, file_id_i))
+                changed += 1
+
+        if updates:
+            self._conn.executemany(
+                "UPDATE file SET integrity_state = ? WHERE id = ?;",
+                updates,
+            )
+            self._conn.commit()
+
+        self.last_changed_count = int(changed)
         return results
 
     @staticmethod

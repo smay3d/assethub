@@ -28,6 +28,7 @@ from assethub.core.db.schema import initialize_schema
 from assethub.core.health.checker import HealthChecker
 from assethub.core.scanner.scanner import Scanner
 from assethub.core.storage.roots import StorageManager, StorageRoot
+from assethub.core.events.event_hub import DbChanged, ScanFinished, HealthFinished
 
 
 class _WorkerSignals(QObject):
@@ -69,6 +70,7 @@ class ScanSummary:
 @dataclass(frozen=True)
 class HealthSummary:
     counts_by_state: dict[str, int]
+    changed_rows: int
     canceled: bool
     elapsed_s: float
 
@@ -189,6 +191,10 @@ class ScanTab(QWidget):
         root = sm.register_root(path)
         self._append_log(f"[storage] Registered root: {root.name} ({root.root_path})")
         self.refresh_roots()
+        # Stage 7.5: notify other views.
+        self.context.event_hub.db_changed.emit(
+            DbChanged(reason="storage_root_registered", payload={"storage_id": int(root.id)})
+        )
 
     @Slot()
     def _on_remove_root(self) -> None:
@@ -237,6 +243,10 @@ class ScanTab(QWidget):
         sm.unregister_root(storage_id)
         self._append_log(f"[storage] Unregistered root: {root.name} ({root.root_path})")
         self.refresh_roots()
+        # Stage 7.5: notify other views.
+        self.context.event_hub.db_changed.emit(
+            DbChanged(reason="storage_root_unregistered", payload={"storage_id": int(storage_id)})
+        )
 
     @Slot()
     def _on_scan(self) -> None:
@@ -283,12 +293,41 @@ class ScanTab(QWidget):
             self.status_label.setText(f"Scan complete ({tag})")
             self._append_log(f"[scan] Indexed {result.files_indexed} files in {result.elapsed_s:.2f}s ({tag})")
             self.scan_completed.emit()
+            # Stage 7.5: Central event hub emissions.
+            self.context.event_hub.scan_finished.emit(
+                ScanFinished(
+                    summary={
+                        "files_indexed": int(result.files_indexed),
+                        "canceled": bool(result.canceled),
+                        "elapsed_s": float(result.elapsed_s),
+                    }
+                )
+            )
+            if int(result.files_indexed) > 0:
+                self.context.event_hub.db_changed.emit(
+                    DbChanged(reason="scan_index_updated", payload={"files_indexed": int(result.files_indexed)})
+                )
         elif isinstance(result, HealthSummary):
             tag = "canceled" if result.canceled else "ok"
             self.status_label.setText(f"Health check complete ({tag})")
             counts = ", ".join(f"{k}={v}" for k, v in sorted(result.counts_by_state.items()))
             self._append_log(f"[health] {counts} in {result.elapsed_s:.2f}s ({tag})")
             self.health_completed.emit()
+            # Stage 7.5: Central event hub emissions.
+            self.context.event_hub.health_finished.emit(
+                HealthFinished(
+                    summary={
+                        "counts_by_state": dict(result.counts_by_state),
+                        "changed_rows": int(result.changed_rows),
+                        "canceled": bool(result.canceled),
+                        "elapsed_s": float(result.elapsed_s),
+                    }
+                )
+            )
+            if int(result.changed_rows) > 0:
+                self.context.event_hub.db_changed.emit(
+                    DbChanged(reason="health_states_updated", payload={"changed_rows": int(result.changed_rows)})
+                )
         else:
             self.status_label.setText(f"Done: {job or 'job'}")
             self._append_log(f"[job] Finished {job or 'job'}")
@@ -340,7 +379,12 @@ class ScanTab(QWidget):
             for r in results:
                 counts[r.new_state] = counts.get(r.new_state, 0) + 1
             elapsed = time.perf_counter() - start
-            return HealthSummary(counts_by_state=counts, canceled=cancel.is_set(), elapsed_s=elapsed)
+            return HealthSummary(
+                counts_by_state=counts,
+                changed_rows=int(getattr(health, "last_changed_count", 0)),
+                canceled=cancel.is_set(),
+                elapsed_s=elapsed,
+            )
         finally:
             conn.close()
 
