@@ -32,6 +32,34 @@ from assethub.core.events.event_hub import DbChanged
 from assethub.ui.actions.library_actions import LibraryActions
 
 
+class _LibraryTableView(QTableView):
+    """QTableView with right-click selection preservation.
+
+    Qt's default behavior collapses multi-selection on right-click. For our
+    Library table, we want the standard desktop behavior:
+      - Right-click on an already-selected row: keep the selection set
+      - Right-click on an unselected row: select only that row
+    """
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        try:
+            if event.button() == Qt.MouseButton.RightButton:
+                # Qt6: event.position() -> QPointF
+                pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                idx = self.indexAt(pos)
+                if idx.isValid():
+                    sel = self.selectionModel()
+                    if sel is not None and sel.isSelected(idx):
+                        # Preserve the existing multi-selection; just move the current index.
+                        sel.setCurrentIndex(idx, QItemSelectionModel.SelectionFlag.NoUpdate)
+                        event.accept()
+                        return
+        except Exception:
+            pass
+
+        super().mousePressEvent(event)
+
+
 class FileFilterProxyModel(QSortFilterProxyModel):
     """Proxy model that implements search + simple dropdown filters."""
 
@@ -194,7 +222,7 @@ class LibraryTab(QWidget):
         left_layout.setContentsMargins(0, 0, 0, 0)
 
         # Table
-        self.table = QTableView(left)
+        self.table = _LibraryTableView(left)
         self.table.setModel(self.proxy)
         self.table.setSortingEnabled(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -543,9 +571,14 @@ class LibraryTab(QWidget):
         # If the row is not already selected, replace selection with that row.
         sel = self.table.selectionModel()
         if sel is not None:
-            if not sel.isRowSelected(idx.row(), idx.parent()):
-                sel.select(idx, QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows)
-            self.table.setCurrentIndex(idx)
+            # If the clicked row is not already selected, replace selection with that row.
+            # If it is selected, preserve multi-selection and just update the current row.
+            if not sel.isSelected(idx):
+                sel.select(
+                    idx,
+                    QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows,
+                )
+            sel.setCurrentIndex(idx, QItemSelectionModel.SelectionFlag.NoUpdate)
 
         # Build menu based on current selection snapshot.
         selected_ids = list(self._selected_file_ids)

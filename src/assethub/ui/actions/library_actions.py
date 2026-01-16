@@ -21,6 +21,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QMessageBox, QWidget
 
 from assethub.context import AppContext
+from assethub.core.events.event_hub import DbChanged, HealthFinished
 from assethub.core.db.file_records import (
     FileRecordInfo,
     delete_missing_file_records,
@@ -201,11 +202,13 @@ class LibraryActions:
         # Always emit a health_finished summary.
         try:
             self.context.event_hub.health_finished.emit(
-                {
-                    "targeted": True,
-                    "checked_count": len(file_ids),
-                    "changed_rows": changed,
-                }
+                HealthFinished(
+                    summary={
+                        "targeted": True,
+                        "checked_count": len(file_ids),
+                        "changed_rows": changed,
+                    }
+                )
             )
         except Exception:
             pass
@@ -214,8 +217,10 @@ class LibraryActions:
         if changed > 0:
             try:
                 self.context.event_hub.db_changed.emit(
-                    reason="health_check_targeted",
-                    payload={"changed_rows": changed, "checked_count": len(file_ids)},
+                    DbChanged(
+                        reason="health_check_targeted",
+                        payload={"changed_rows": changed, "checked_count": len(file_ids)},
+                    )
                 )
             except Exception:
                 pass
@@ -237,8 +242,10 @@ class LibraryActions:
         if deleted > 0:
             try:
                 self.context.event_hub.db_changed.emit(
-                    reason="file_records_deleted",
-                    payload={"count": deleted},
+                    DbChanged(
+                        reason="file_records_deleted",
+                        payload={"count": deleted},
+                    )
                 )
             except Exception:
                 pass
