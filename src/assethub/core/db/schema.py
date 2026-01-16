@@ -25,6 +25,7 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
     CREATE TABLE IF NOT EXISTS storage (
         id          INTEGER PRIMARY KEY,
         name        TEXT NOT NULL,
+        display_name TEXT,
         root_path   TEXT,
         status      TEXT NOT NULL DEFAULT 'OK',
         created_at  TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
@@ -81,10 +82,41 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
 
     conn.executescript(ddl)
 
-    # Record schema version if not present.
+    # ---
+    # Schema versioning + migrations
+    # ---
+    # Stage 7.6.2 introduces storage.display_name and bumps schema version to 2.
+    latest_version = 2
+
     row = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()
     current = row[0] if row else None
-    if current is None:
-        conn.execute("INSERT INTO schema_version(version) VALUES (1);")
 
+    if current is None:
+        # Fresh DB: record the latest schema version.
+        conn.execute("INSERT INTO schema_version(version) VALUES (?);", (int(latest_version),))
+        conn.commit()
+        return
+
+    try:
+        current_i = int(current)
+    except Exception:
+        current_i = 0
+
+    if current_i < 2:
+        _migrate_to_v2(conn)
+
+    conn.commit()
+
+
+def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+    """Stage 7.6.2 migration.
+
+    Adds storage.display_name (nullable) and records schema_version 2.
+    """
+    # Guard against partial/hand-modified DBs.
+    cols = [str(r[1]) for r in conn.execute("PRAGMA table_info(storage);").fetchall()]
+    if "display_name" not in cols:
+        conn.execute("ALTER TABLE storage ADD COLUMN display_name TEXT;")
+
+    conn.execute("INSERT INTO schema_version(version) VALUES (2);")
     conn.commit()

@@ -45,7 +45,7 @@ def fetch_file_records(conn: sqlite3.Connection, file_ids: Iterable[int]) -> Lis
         SELECT
             file.id,
             file.storage_id,
-            storage.name,
+            COALESCE(NULLIF(storage.display_name, ''), storage.name) AS storage_label,
             storage.root_path,
             file.relative_path,
             file.integrity_state,

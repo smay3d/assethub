@@ -309,7 +309,7 @@ class LibraryTab(QWidget):
                 file.id,
                 file.version_id,
                 file.storage_id,
-                storage.name,
+                COALESCE(NULLIF(storage.display_name, ''), storage.name) AS storage_label,
                 file.relative_path,
                 file.integrity_state,
                 file.size_bytes,
@@ -377,7 +377,7 @@ class LibraryTab(QWidget):
         if sm is not None:
             for r in sm.list_roots():
                 # Show name; if duplicates ever exist, id distinguishes.
-                self.storage_combo.addItem(r.name, int(r.id))
+                self.storage_combo.addItem(r.display_label, int(r.id))
         self.storage_combo.blockSignals(False)
 
         # Integrity options

@@ -15,9 +15,10 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QInputDialog,
+    QMenu,
     QTableWidget,
     QTableWidgetItem,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -114,6 +115,8 @@ class ScanTab(QWidget):
         self.roots_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.roots_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.roots_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.roots_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.roots_table.customContextMenuRequested.connect(self._on_roots_context_menu)
         self.roots_table.horizontalHeader().setStretchLastSection(True)
         self.roots_table.setColumnHidden(0, True)  # hide ID
         root_layout.addWidget(self.roots_table)
@@ -143,15 +146,11 @@ class ScanTab(QWidget):
         actions_row.addStretch(1)
         root_layout.addLayout(actions_row)
 
-        # Status + log
+        # Status
         self.status_label = QLabel("Idle")
-        self.log_box = QTextEdit(self)
-        self.log_box.setReadOnly(True)
 
         root_layout.addWidget(QLabel("Status"))
         root_layout.addWidget(self.status_label)
-        root_layout.addWidget(QLabel("Summary"))
-        root_layout.addWidget(self.log_box)
 
     # -------------------------
     # Public API
@@ -164,7 +163,10 @@ class ScanTab(QWidget):
         if not self._cancel_event.is_set():
             self._cancel_event.set()
             self.status_label.setText(f"Cancel requested ({self._current_job})…")
-            self._append_log(f"[cancel] Requested cancel for {self._current_job} job")
+            try:
+                self.context.log.warn(f"Cancel requested: {self._current_job}")
+            except Exception:
+                pass
 
     def refresh_roots(self) -> None:
         sm = self._require_storage_manager()
@@ -193,7 +195,10 @@ class ScanTab(QWidget):
 
         sm = self._require_storage_manager()
         root = sm.register_root(path)
-        self._append_log(f"[storage] Registered root: {root.name} ({root.root_path})")
+        try:
+            self.context.log.info(f"Registered storage root: {root.name} ({root.root_path})")
+        except Exception:
+            pass
         self.refresh_roots()
         # Stage 7.5: notify other views.
         self.context.event_hub.db_changed.emit(
@@ -239,13 +244,16 @@ class ScanTab(QWidget):
         confirm = QMessageBox.question(
             self,
             "Remove Storage Root",
-            f"Remove storage root '{root.name}'?\n\n{root.root_path}",
+            f"Remove storage root '{root.display_label}'?\n\n{root.root_path}",
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
 
         sm.unregister_root(storage_id)
-        self._append_log(f"[storage] Unregistered root: {root.name} ({root.root_path})")
+        try:
+            self.context.log.info(f"Unregistered storage root: {root.display_label} ({root.root_path})")
+        except Exception:
+            pass
         self.refresh_roots()
         # Stage 7.5: notify other views.
         self.context.event_hub.db_changed.emit(
@@ -295,7 +303,10 @@ class ScanTab(QWidget):
             return
 
         deleted = purge_all_missing_file_records(conn)
-        self._append_log(f"[cleanup] Removed {deleted} MISSING file record(s) from database")
+        try:
+            self.context.log.info(f"Cleanup missing: removed {deleted} MISSING file record(s) from database")
+        except Exception:
+            pass
 
         if deleted > 0:
             self.context.event_hub.db_changed.emit(
@@ -337,7 +348,12 @@ class ScanTab(QWidget):
         if isinstance(result, ScanSummary):
             tag = "canceled" if result.canceled else "ok"
             self.status_label.setText(f"Scan complete ({tag})")
-            self._append_log(f"[scan] Indexed {result.files_indexed} files in {result.elapsed_s:.2f}s ({tag})")
+            try:
+                self.context.log.info(
+                    f"Scan roots: indexed {result.files_indexed} file(s) in {result.elapsed_s:.2f}s ({tag})"
+                )
+            except Exception:
+                pass
             self.scan_completed.emit()
             # Stage 7.5: Central event hub emissions.
             self.context.event_hub.scan_finished.emit(
@@ -357,7 +373,10 @@ class ScanTab(QWidget):
             tag = "canceled" if result.canceled else "ok"
             self.status_label.setText(f"Health check complete ({tag})")
             counts = ", ".join(f"{k}={v}" for k, v in sorted(result.counts_by_state.items()))
-            self._append_log(f"[health] {counts} in {result.elapsed_s:.2f}s ({tag})")
+            try:
+                self.context.log.info(f"Health check: {counts} in {result.elapsed_s:.2f}s ({tag})")
+            except Exception:
+                pass
             self.health_completed.emit()
             # Stage 7.5: Central event hub emissions.
             self.context.event_hub.health_finished.emit(
@@ -376,7 +395,10 @@ class ScanTab(QWidget):
                 )
         else:
             self.status_label.setText(f"Done: {job or 'job'}")
-            self._append_log(f"[job] Finished {job or 'job'}")
+            try:
+                self.context.log.info(f"Finished job: {job or 'job'}")
+            except Exception:
+                pass
 
     @Slot(str)
     def _on_job_error(self, message: str) -> None:
@@ -385,7 +407,10 @@ class ScanTab(QWidget):
         self._current_job = None
         self._cancel_event = None
         self.status_label.setText(f"Error: {job or 'job'}")
-        self._append_log(f"[error] {job or 'job'}: {message}")
+        try:
+            self.context.log.error(f"{job or 'job'} failed: {message}")
+        except Exception:
+            pass
         QMessageBox.critical(self, "AssetHub", f"{job or 'Job'} failed:\n\n{message}")
 
     def _set_busy(self, busy: bool) -> None:
@@ -439,14 +464,14 @@ class ScanTab(QWidget):
     # Helpers
     # -------------------------
 
-    def _append_log(self, line: str) -> None:
-        self.log_box.append(line)
-
     def _set_root_row(self, row: int, root: StorageRoot) -> None:
         id_item = QTableWidgetItem(str(root.id))
         id_item.setData(Qt.ItemDataRole.UserRole, int(root.id))
 
-        name_item = QTableWidgetItem(root.name)
+        name_item = QTableWidgetItem(root.display_label)
+        if (root.display_name or "").strip():
+            # Preserve the underlying default name for debugging.
+            name_item.setToolTip(f"Default name: {root.name}")
         path_item = QTableWidgetItem(root.root_path or "(Unmanaged)")
         status_item = QTableWidgetItem(root.status)
 
@@ -455,6 +480,151 @@ class ScanTab(QWidget):
         self.roots_table.setItem(row, 2, path_item)
         self.roots_table.setItem(row, 3, status_item)
 
+    # -------------------------
+    # Context menu: storage roots
+    # -------------------------
+
+    @Slot(object)
+    def _on_roots_context_menu(self, pos) -> None:
+        """Right-click context menu for storage roots (Stage 7.6.2)."""
+        try:
+            idx = self.roots_table.indexAt(pos)
+            if not idx.isValid():
+                return
+
+            row = idx.row()
+            storage_id = self._root_id_for_row(row)
+            if storage_id is None:
+                return
+
+            sm = self._require_storage_manager()
+            roots = {r.id: r for r in sm.list_roots()}
+            root = roots.get(int(storage_id))
+            if root is None:
+                return
+
+            menu = QMenu(self)
+
+            act_rename = menu.addAction("Rename (display name)…")
+            act_remove = menu.addAction("Remove root from tracking…")
+
+            # Unmanaged is protected from destructive actions.
+            if root.root_path is None or str(root.status).upper() == StorageManager.UNMANAGED_STATUS:
+                act_rename.setEnabled(False)
+                act_remove.setEnabled(False)
+
+            chosen = menu.exec(self.roots_table.viewport().mapToGlobal(pos))
+            if chosen is None:
+                return
+
+            if chosen == act_rename:
+                self._rename_storage_root(root)
+            elif chosen == act_remove:
+                self._remove_root_from_tracking(root)
+        except Exception:
+            return
+
+    def _rename_storage_root(self, root: StorageRoot) -> None:
+        """Prompt the user to set/clear a storage root display name."""
+        if root.root_path is None or str(root.status).upper() == StorageManager.UNMANAGED_STATUS:
+            QMessageBox.warning(self, "AssetHub", "Cannot rename the Unmanaged storage root.")
+            return
+
+        current = (root.display_name or "").strip()
+        text, ok = QInputDialog.getText(
+            self,
+            "Rename storage root",
+            "Display name (leave empty to clear):",
+            text=current,
+        )
+        if not ok:
+            return
+
+        sm = self._require_storage_manager()
+        try:
+            old, new = sm.set_display_name(int(root.id), text)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "AssetHub", f"Rename failed:\n\n{exc}")
+            return
+
+        # Refresh this table immediately.
+        self.refresh_roots()
+
+        try:
+            self.context.log.info(
+                f"Storage root renamed: id={int(root.id)} '{(old or '')}' -> '{(new or '')}'"
+            )
+        except Exception:
+            pass
+
+        self.context.event_hub.db_changed.emit(
+            DbChanged(
+                reason="storage_renamed",
+                payload={"storage_id": int(root.id), "old": old or "", "new": new or ""},
+            )
+        )
+
+    def _remove_root_from_tracking(self, root: StorageRoot) -> None:
+        """Remove a storage root and all associated tracked file rows (DB-only).
+
+        This is the destructive counterpart to the "Remove Root" button, which
+        only unregisters roots that have no associated file records.
+
+        Notes:
+            - Does not delete files from disk.
+            - Disallows Unmanaged.
+        """
+        if self._current_job is not None:
+            QMessageBox.information(
+                self, "AssetHub", "A job is running. Cancel or wait before removing roots."
+            )
+            return
+
+        if root.root_path is None or str(root.status).upper() == StorageManager.UNMANAGED_STATUS:
+            QMessageBox.warning(self, "AssetHub", "Cannot remove the Unmanaged storage root.")
+            return
+
+        sm = self._require_storage_manager()
+        try:
+            count = sm.count_files_for_storage(int(root.id))
+        except Exception:
+            count = 0
+
+        msg = (
+            f"Remove storage root from tracking?\n\n"
+            f"Name: {root.display_label}\n"
+            f"Path: {root.root_path}\n\n"
+            f"This will remove {int(count)} tracked file record(s) from the database.\n"
+            "This does NOT delete files from disk."
+        )
+
+        confirm = QMessageBox.question(self, "Remove root from tracking", msg)
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            removed = sm.remove_root_from_tracking(int(root.id))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "AssetHub", f"Remove failed:\n\n{exc}")
+            return
+
+        # Refresh Scan roots immediately.
+        self.refresh_roots()
+
+        try:
+            self.context.log.warn(
+                f"Removed root from tracking: {root.display_label} ({root.root_path}); removed {int(removed)} file record(s)"
+            )
+        except Exception:
+            pass
+
+        # Notify other views (Library/Settings) to refresh.
+        self.context.event_hub.db_changed.emit(
+            DbChanged(
+                reason="storage_removed",
+                payload={"storage_id": int(root.id), "files_removed": int(removed)},
+            )
+        )
     def _root_id_for_row(self, row: int) -> Optional[int]:
         item = self.roots_table.item(row, 0)
         if item is None:

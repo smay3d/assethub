@@ -199,6 +199,13 @@ class LibraryActions:
         health.check_files([int(x) for x in file_ids])
         changed = int(health.last_changed_count)
 
+        try:
+            self.context.log.info(
+                f"Targeted health check: checked {len(file_ids)} file(s); changed {changed} row(s)."
+            )
+        except Exception:
+            pass
+
         # Always emit a health_finished summary.
         try:
             self.context.event_hub.health_finished.emit(
@@ -239,6 +246,12 @@ class LibraryActions:
         if conn is None:
             return 0
         deleted = delete_missing_file_records(conn, file_ids)
+        try:
+            self.context.log.info(
+                f"Remove missing selection: removed {deleted} file record(s) from database (selection={len(file_ids)})."
+            )
+        except Exception:
+            pass
         if deleted > 0:
             try:
                 self.context.event_hub.db_changed.emit(

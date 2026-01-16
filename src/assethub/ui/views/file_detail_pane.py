@@ -535,7 +535,7 @@ class FileDetailPane(QWidget):
                 file.id,
                 file.version_id,
                 file.storage_id,
-                storage.name,
+                COALESCE(NULLIF(storage.display_name, ''), storage.name) AS storage_label,
                 storage.root_path,
                 storage.status,
                 file.relative_path,

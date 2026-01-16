@@ -72,3 +72,60 @@ def test_register_root_and_resolve(tmp_path) -> None:
     stor3, rel3 = sm.resolve_storage_for_path(str(outside))
     assert stor3.root_path is None
     assert "outside" in rel3
+
+
+def test_remove_root_from_tracking_cascade(tmp_path) -> None:
+    conn = sqlite3.connect(tmp_path / "db.sqlite3")
+    initialize_schema(conn)
+
+    sm = StorageManager(conn)
+    unmanaged = sm.ensure_unmanaged_storage()
+
+    root = tmp_path / "RootX"
+    root.mkdir()
+    r = sm.register_root(str(root), name="RootX")
+
+    # Seed tracked file rows.
+    conn.executemany(
+        "INSERT INTO file(storage_id, relative_path, integrity_state) VALUES (?, ?, 'OK');",
+        [
+            (int(r.id), "a.txt"),
+            (int(r.id), "b.txt"),
+            (int(r.id), "sub/c.txt"),
+        ],
+    )
+    conn.commit()
+
+    assert sm.count_files_for_storage(int(r.id)) == 3
+
+    removed = sm.remove_root_from_tracking(int(r.id))
+    assert removed == 3
+
+    # Storage row removed.
+    row = conn.execute("SELECT COUNT(*) FROM storage WHERE id = ?;", (int(r.id),)).fetchone()
+    assert row is not None
+    assert int(row[0]) == 0
+
+    # File rows removed.
+    row2 = conn.execute("SELECT COUNT(*) FROM file WHERE storage_id = ?;", (int(r.id),)).fetchone()
+    assert row2 is not None
+    assert int(row2[0]) == 0
+
+    # Unmanaged remains intact.
+    row3 = conn.execute("SELECT COUNT(*) FROM storage WHERE id = ?;", (int(unmanaged.id),)).fetchone()
+    assert row3 is not None
+    assert int(row3[0]) == 1
+
+
+def test_remove_root_from_tracking_disallows_unmanaged(tmp_path) -> None:
+    conn = sqlite3.connect(tmp_path / "db.sqlite3")
+    initialize_schema(conn)
+
+    sm = StorageManager(conn)
+    unmanaged = sm.ensure_unmanaged_storage()
+
+    try:
+        sm.remove_root_from_tracking(int(unmanaged.id))
+        assert False, "Expected ValueError"
+    except ValueError:
+        pass

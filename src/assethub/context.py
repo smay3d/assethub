@@ -18,6 +18,7 @@ from .core.previews.manager import PreviewManager
 from .core.sidecar.manager import SidecarManager
 from .core.health.checker import HealthChecker
 from .core.events.event_hub import EventHub
+from .core.utils.app_log import AppLog
 from .core.db.connection import get_connection
 from .core.db.schema import initialize_schema
 
@@ -57,6 +58,9 @@ class AppContext:
 
     # Stage 7.5: central non-Qt signaling
     event_hub: EventHub = field(default_factory=EventHub)
+
+    # Stage 7.6: global app log (Qt-free; UI attaches a sink)
+    log: AppLog = field(default_factory=AppLog)
 
     # Core subsystems:
     db_connection: Optional[Any] = None
