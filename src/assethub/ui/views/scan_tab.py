@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from assethub.context import AppContext
 from assethub.core.db.connection import get_connection
+from assethub.core.db.file_records import purge_all_missing_file_records
 from assethub.core.db.schema import initialize_schema
 from assethub.core.health.checker import HealthChecker
 from assethub.core.scanner.scanner import Scanner
@@ -132,10 +133,13 @@ class ScanTab(QWidget):
         actions_row = QHBoxLayout()
         self.btn_scan = QPushButton("Scan Roots")
         self.btn_health = QPushButton("Run Health Check")
+        self.btn_cleanup_missing = QPushButton("Cleanup MISSING Files")
         self.btn_scan.clicked.connect(self._on_scan)
         self.btn_health.clicked.connect(self._on_health_check)
+        self.btn_cleanup_missing.clicked.connect(self._on_cleanup_missing)
         actions_row.addWidget(self.btn_scan)
         actions_row.addWidget(self.btn_health)
+        actions_row.addWidget(self.btn_cleanup_missing)
         actions_row.addStretch(1)
         root_layout.addLayout(actions_row)
 
@@ -256,6 +260,48 @@ class ScanTab(QWidget):
     def _on_health_check(self) -> None:
         self._start_job("health", self._health_job)
 
+    @Slot()
+    def _on_cleanup_missing(self) -> None:
+        """Remove all tracked file records currently marked MISSING.
+
+        This does NOT delete files from disk; it only removes DB tracking rows.
+        """
+        if self._current_job is not None:
+            QMessageBox.information(self, "AssetHub", "A job is running. Cancel or wait before cleanup.")
+            return
+
+        conn = self.context.db_connection
+        if conn is None:
+            QMessageBox.warning(self, "AssetHub", "Database is not available.")
+            return
+
+        row = conn.execute("SELECT COUNT(*) FROM file WHERE UPPER(integrity_state)='MISSING';").fetchone()
+        missing_count = int(row[0]) if row and row[0] is not None else 0
+
+        if missing_count <= 0:
+            QMessageBox.information(self, "AssetHub", "No MISSING records were found in the database.")
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            "Cleanup MISSING Files",
+            (
+                f"Found {missing_count} tracked file record(s) marked MISSING.\n\n"
+                "Remove all MISSING records from the database?\n\n"
+                "This does NOT delete files from disk; it only removes tracking rows."
+            ),
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        deleted = purge_all_missing_file_records(conn)
+        self._append_log(f"[cleanup] Removed {deleted} MISSING file record(s) from database")
+
+        if deleted > 0:
+            self.context.event_hub.db_changed.emit(
+                DbChanged(reason="missing_records_purged", payload={"count": int(deleted)})
+            )
+
     # -------------------------
     # Job control
     # -------------------------
@@ -347,6 +393,7 @@ class ScanTab(QWidget):
         self.btn_remove_root.setEnabled(not busy)
         self.btn_scan.setEnabled(not busy)
         self.btn_health.setEnabled(not busy)
+        self.btn_cleanup_missing.setEnabled(not busy)
 
     # -------------------------
     # Background task implementations
