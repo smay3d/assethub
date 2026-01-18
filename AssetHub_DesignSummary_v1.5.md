@@ -1,4 +1,4 @@
-# AssetHub Project Design Summary (v1)
+# AssetHub Project Design Summary (v1.5)
 
 This document captures the current design state of the AssetHub project for reference, consistency, and future development. It summarizes each stage completed so far and the decisions made.
 
@@ -280,9 +280,106 @@ This completes the core backend foundation and prepares the project for UI integ
 
 ---
 
-## Stage 7 — UI Integration & Asset Semantics (Planned)
+## Stage 7 — UI Integration (File-Level UI Exposes Stage 6 Backend)
+
+Stage 7 brings the Stage 6 backend systems into a usable, readable UI at the **file record** level. The core principle remains: **AssetHub does not write to or restructure user files**. Stage 7 focuses on *indexing, inspecting, and maintaining tracking state* (DB + sidecars later), not editing files on disk.
+
+### File-level navigation and diagnostics (Scan + Library)
+
+AssetHub now supports a complete “scan → browse → inspect → diagnose → maintain” loop for file records:
+
+- **Scan tab (Stage 7.1)**
+  - Register and persist storage roots
+  - Scan registered roots into the `file` table (files-only indexing)
+  - Run health checks across tracked files to update `integrity_state`
+  - Background jobs via Qt threadpool + safe cancellation (ESC)
+  - Storage removal guardrails (Unmanaged protected; safe remove blocked if files exist)
+
+- **Library tab (Stage 7.2)**
+  - Table view over `file` + `storage` join
+  - Search (filename + relative path), sort, and filters (storage root + integrity)
+  - Developer “show hidden columns” toggle for internal fields
+
+### Master–detail file inspection (Library detail pane)
+
+- **Library master–detail layout (Stage 7.3)**
+  - Split view with a file table on the left and a **File Detail Pane** on the right
+  - Image preview for supported formats; graceful fallback for unsupported/missing files
+  - Read-only metadata surface (resolved absolute path, storage root, timestamps, size, integrity)
+  - “Advanced” collapsible section for raw/internal fields
+  - Context menu actions for quick copy/open workflows
+  - Refresh preserves selection (by stable `file_id`) when possible
+
+### Read-only system transparency (Settings tab)
+
+- **Settings tab (Stage 7.4)**
+  - Read-only “under the hood” snapshot: app/version, schema version, key paths
+  - DB/index stats (tracked/missing counts, storage count, unmanaged presence, db size)
+  - UI behavior transparency (row caps, preview formats/caps, etc.)
+  - Convenience actions (copy diagnostics summary, open folders)
+
+### Stage 8 readiness foundation (signals, multi-select, actions)
+
+- **EventHub (Stage 7.5)**
+  - A lightweight, non-Qt signal hub owned by `AppContext`
+  - Canonical events used throughout UI:
+    - `db_changed(reason, payload)`
+    - `scan_finished(summary)`
+    - `health_finished(summary)`
+  - Library/Settings subscribe for refresh to prevent “UI drift” and action spaghetti
+
+- **Library multi-selection + action plumbing (Stage 7.5)**
+  - Standard desktop multi-select (extended selection)
+  - Clean separation: UI gathers `file_ids`, then calls a dedicated `LibraryActions` layer
+  - Context menu actions include open/reveal/copy, targeted health check, and “remove missing from DB” (MISSING-only)
+  - Scan tab includes a bulk maintenance action: **remove all MISSING records from database**
+
+- **Current vs Selected rule (Stage 7.5)**
+  - “Current” row drives preview
+  - “Selected set” drives selection summary + context menu targeting
+  - Preserves preview usefulness during multi-select
+
+### Stage 7.6 usability + control surface extensions
+
+Stage 7.6 closes remaining file-level UX/control gaps discovered during testing while keeping Stage 8 integration smooth:
+
+- **Global MainWindow Log**
+  - A low-visual-weight log pane in a bottom splitter
+  - Central logging API on context: `ctx.log.info/warn/error(...)`
+  - Promotes action outcomes to a single shared reporting surface (Scan tab summary log removed)
+
+- **Storage root display names**
+  - Added `storage.display_name` (DB schema v2)
+  - UI consistently displays `display_name` when set, otherwise falls back to the storage name
+  - Rename action (Scan tab context menu) edits DB only; Unmanaged is not renameable
+
+- **Remove root from tracking (DB-only cascade)**
+  - Explicit destructive action in Scan tab context menu:
+    - Deletes associated `file` rows for that `storage_id`
+    - Then deletes the storage row
+  - Transactional and **does not delete files on disk**
+  - Clear confirmation UI, logging, and immediate UI refresh via EventHub
+
+### Resulting State
+
+At the end of Stage 7, AssetHub has a stable, developer-friendly file-level UI that exposes the Stage 6 backend end-to-end:
+
+- Storage roots can be registered, renamed (display only), and removed from tracking (safe or cascade)
+- Files can be scanned, browsed, previewed, and diagnosed
+- Integrity issues can be maintained (targeted health, delete missing records, purge all missing)
+- UI stays consistent via centralized signaling (EventHub) and centralized action logging
+
+---
+
+## Stage 8 — Asset Semantics (Planned)
+
+Stage 8 will introduce asset-level concepts on top of the Stage 7 file-level foundation:
+
+- Asset grouping (one asset ↔ many files) and version semantics
+- Asset-level Library browsing and Detail workbench
+- Sidecar JSON authoring/reading workflows for asset/version metadata
+- Reusing Stage 7.5 foundations (EventHub + action plumbing + selection rules + global log) to avoid UI drift
 
 ---
 
 *This document acts as the authoritative design reference for the project’s current state.*
-
