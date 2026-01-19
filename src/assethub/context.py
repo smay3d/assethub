@@ -25,11 +25,10 @@ from .core.db.schema import initialize_schema
 
 @dataclass
 class AppConfig:
-    """
-    Minimal config representation used by AppContext.
+    """Minimal configuration used by `AppContext`.
 
-    This will be extended in later stages, but for now stores basic paths
-    and UI-related settings.
+    This will expand over time. For v0, it primarily stores key paths and
+    simple UI settings.
     """
 
     data_root: str
@@ -42,16 +41,10 @@ class AppConfig:
 
 @dataclass
 class AppContext:
-    """
-    AppContext is the composition root of the AssetHub application.
+    """Composition root for the running application.
 
-    It owns and initializes all long-lived core services such as the
-    database connection, storage manager, scanner, and health checker.
-    UI layers and other subsystems should treat AppContext as the single
-    authoritative access point for shared application state.
-
-    AppContext is responsible for the lifetime of the resources it
-    creates and must be explicitly shut down when the application exits.
+    Owns long-lived services (DB connection, StorageManager, Scanner, etc.)
+    and provides a single shared access point for UI and background jobs.
     """
 
     config: AppConfig
@@ -97,7 +90,7 @@ class AppContext:
 
         # Storage and indexing
         self.storage_manager = StorageManager(self.db_connection)
-        self.storage_manager.ensure_unmanaged_storage() # guarantee Unmanaged storage exists
+        self.storage_manager.ensure_unmanaged_storage()  # guarantee Unmanaged storage exists
         self.scanner = Scanner(self.db_connection, self.storage_manager)
 
         # Health checking (DB + Storage dependent)

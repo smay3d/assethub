@@ -68,26 +68,34 @@ class LibraryActions:
     # -----------------
 
     def open_file_with_default(self, current_file_id: Optional[int]) -> None:
+        """Open the current file with the OS-default application."""
         if current_file_id is None:
             return
         recs = self.fetch_records([current_file_id])
         if not recs:
+            self._log_warn(f"Open file: record not found (id={int(current_file_id)})")
             return
         abs_path = self._abs_path_for_record(recs[0])
         if not abs_path:
+            self._log_warn(f"Open file: could not resolve path (id={int(current_file_id)})")
             return
         if not os.path.exists(abs_path):
+            self._log_warn(f"Open file: missing on disk (id={int(current_file_id)})")
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(abs_path))
+        self._log_info(f"Open file: {recs[0].relative_path}")
 
     def reveal_in_explorer(self, current_file_id: Optional[int]) -> None:
+        """Reveal the current file in the platform file manager."""
         if current_file_id is None:
             return
         recs = self.fetch_records([current_file_id])
         if not recs:
+            self._log_warn(f"Reveal: record not found (id={int(current_file_id)})")
             return
         abs_path = self._abs_path_for_record(recs[0])
         if not abs_path:
+            self._log_warn(f"Reveal: could not resolve path (id={int(current_file_id)})")
             return
 
         # Prefer selecting the file on Windows.
@@ -95,6 +103,7 @@ class LibraryActions:
             if sys.platform.startswith("win"):
                 # explorer expects '/select,' with comma.
                 subprocess.Popen(["explorer", "/select,", os.path.normpath(abs_path)])
+                self._log_info(f"Reveal in Explorer: {recs[0].relative_path}")
                 return
         except Exception:
             pass
@@ -102,17 +111,22 @@ class LibraryActions:
         folder = os.path.dirname(abs_path)
         if folder:
             QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+            self._log_info(f"Open folder: {folder}")
 
     def open_storage_root_location(self, current_file_id: Optional[int]) -> None:
+        """Open the storage root folder for the current file."""
         if current_file_id is None:
             return
         recs = self.fetch_records([current_file_id])
         if not recs:
+            self._log_warn(f"Open storage root: record not found (id={int(current_file_id)})")
             return
         root = recs[0].storage_root_path
         if not root:
+            self._log_warn(f"Open storage root: unresolved root (id={int(current_file_id)})")
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(root))
+        self._log_info(f"Open storage root: {root}")
 
     # -----------------
     # Copy
@@ -125,6 +139,7 @@ class LibraryActions:
             rel = r.relative_path.replace("\\", "/")
             names.append(rel.split("/")[-1] if "/" in rel else rel)
         set_clipboard_text("\n".join(names))
+        self._log_info(f"Copy: file name(s) to clipboard (count={len(names)})")
 
     def copy_abs_dirs(self, file_ids: List[int]) -> None:
         recs = self.fetch_records(file_ids)
@@ -136,6 +151,7 @@ class LibraryActions:
                 continue
             out.append(os.path.dirname(os.path.normpath(abs_path)))
         set_clipboard_text("\n".join(out))
+        self._log_info(f"Copy: absolute dir(s) to clipboard (count={len(out)})")
 
     def copy_rel_dirs(self, file_ids: List[int]) -> None:
         recs = self.fetch_records(file_ids)
@@ -145,13 +161,19 @@ class LibraryActions:
             d = os.path.dirname(rel)
             out.append(d.replace("\\", "/"))
         set_clipboard_text("\n".join(out))
+        self._log_info(f"Copy: relative dir(s) to clipboard (count={len(out)})")
 
     def copy_checksums_sha256(self, file_ids: List[int], *, limits: ChecksumLimits = ChecksumLimits()) -> None:
+        """Copy SHA256 checksums for the selected file set (best-effort)."""
         recs = self.fetch_records(file_ids)
         if not recs:
+            self._log_warn("Copy checksum: no records found")
             return
 
         if len(recs) > limits.max_files:
+            self._log_warn(
+                f"Copy checksum: blocked by file-count limit (selected={len(recs)}, max={limits.max_files})"
+            )
             self._warn(
                 f"Checksum copy limited to {limits.max_files} files at a time.\n"
                 f"Selected: {len(recs)}"
@@ -164,6 +186,9 @@ class LibraryActions:
                 total_bytes += int(r.size_bytes)
         if total_bytes > limits.max_total_bytes:
             mb = total_bytes / (1024 * 1024)
+            self._log_warn(
+                f"Copy checksum: blocked by size limit (selected={mb:.1f}MB, max={limits.max_total_bytes / (1024 * 1024):.0f}MB)"
+            )
             self._warn(
                 "Checksum copy limited by total size.\n"
                 f"Selected size: {mb:.1f} MB\n"
@@ -182,6 +207,7 @@ class LibraryActions:
             except Exception:
                 lines.append("<UNAVAILABLE>")
         set_clipboard_text("\n".join(lines))
+        self._log_info(f"Copy: checksum(s) to clipboard (count={len(lines)})")
 
     # -----------------
     # Health
@@ -271,5 +297,21 @@ class LibraryActions:
     def _warn(self, message: str) -> None:
         try:
             QMessageBox.warning(self.parent, "AssetHub", message)
+        except Exception:
+            return
+
+    # -----------------
+    # Logging helpers
+    # -----------------
+
+    def _log_info(self, message: str) -> None:
+        try:
+            self.context.log.info(str(message))
+        except Exception:
+            return
+
+    def _log_warn(self, message: str) -> None:
+        try:
+            self.context.log.warn(str(message))
         except Exception:
             return

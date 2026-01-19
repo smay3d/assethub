@@ -27,10 +27,15 @@ class _LogBridge(QObject):
 
 
 class MainWindow(QMainWindow):
-    """
-    Main application window for AssetHub.
+    """Main application window for AssetHub.
 
-    Skeleton: just creates a tab widget with placeholder tabs.
+    Layout:
+        - Primary area: tab widget (Library / Scan / Settings)
+        - Secondary area: global, selectable log view (low visual weight by default)
+
+    Notes:
+        - UI receives log lines via `AppContext.log` sink.
+        - Individual tabs subscribe to `AppContext.event_hub` to stay in sync.
     """
 
     def __init__(self, context: AppContext) -> None:
@@ -120,9 +125,9 @@ class MainWindow(QMainWindow):
             self.scan_tab.request_cancel_current_job()
 
     def _debug_print_context_status(self) -> None:
-        """
-        Temporary Stage 5.6 diagnostic:
-        Print the initialization status of core managers to the console.
+        """Print a quick initialization status report to stdout.
+
+        This is intentionally a simple diagnostic for dev builds.
         """
         print("\n=== AssetHub Stage 5.6 Context Check ===")
         print(f"Context object:     {type(self.context).__name__}")

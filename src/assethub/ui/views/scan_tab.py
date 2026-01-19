@@ -186,11 +186,19 @@ class ScanTab(QWidget):
     def _on_add_root(self) -> None:
         if self._current_job is not None:
             QMessageBox.information(self, "AssetHub", "A job is running. Cancel or wait before adding roots.")
+            try:
+                self.context.log.warn("Add root blocked: job is running")
+            except Exception:
+                pass
             return
 
         start_dir = self.context.config.data_root
         path = QFileDialog.getExistingDirectory(self, "Select Storage Root", start_dir)
         if not path:
+            try:
+                self.context.log.info("Add root canceled")
+            except Exception:
+                pass
             return
 
         sm = self._require_storage_manager()
@@ -209,11 +217,19 @@ class ScanTab(QWidget):
     def _on_remove_root(self) -> None:
         if self._current_job is not None:
             QMessageBox.information(self, "AssetHub", "A job is running. Cancel or wait before removing roots.")
+            try:
+                self.context.log.warn("Remove root blocked: job is running")
+            except Exception:
+                pass
             return
 
         selected = self.roots_table.selectionModel().selectedRows()
         if not selected:
             QMessageBox.information(self, "AssetHub", "Select a storage root to remove.")
+            try:
+                self.context.log.info("Remove root: no selection")
+            except Exception:
+                pass
             return
         row = selected[0].row()
         storage_id = self._root_id_for_row(row)
@@ -229,6 +245,10 @@ class ScanTab(QWidget):
 
         if root.root_path is None or str(root.status).upper() == StorageManager.UNMANAGED_STATUS:
             QMessageBox.warning(self, "AssetHub", "Cannot remove the Unmanaged storage root.")
+            try:
+                self.context.log.warn("Remove root blocked: Unmanaged root")
+            except Exception:
+                pass
             return
 
         in_use = sm.count_files_for_storage(storage_id)
@@ -239,6 +259,12 @@ class ScanTab(QWidget):
                 "Cannot remove this root because it is referenced by tracked files. "
                 "Remove associated file records first, then try again.",
             )
+            try:
+                self.context.log.warn(
+                    f"Remove root blocked: referenced by tracked files (storage_id={int(storage_id)}, file_count={int(in_use)})"
+                )
+            except Exception:
+                pass
             return
 
         confirm = QMessageBox.question(
@@ -247,6 +273,10 @@ class ScanTab(QWidget):
             f"Remove storage root '{root.display_label}'?\n\n{root.root_path}",
         )
         if confirm != QMessageBox.StandardButton.Yes:
+            try:
+                self.context.log.info(f"Remove root canceled: storage_id={int(storage_id)}")
+            except Exception:
+                pass
             return
 
         sm.unregister_root(storage_id)
@@ -262,10 +292,18 @@ class ScanTab(QWidget):
 
     @Slot()
     def _on_scan(self) -> None:
+        try:
+            self.context.log.info("Scan roots: started")
+        except Exception:
+            pass
         self._start_job("scan", self._scan_job)
 
     @Slot()
     def _on_health_check(self) -> None:
+        try:
+            self.context.log.info("Health check: started")
+        except Exception:
+            pass
         self._start_job("health", self._health_job)
 
     @Slot()
@@ -276,11 +314,19 @@ class ScanTab(QWidget):
         """
         if self._current_job is not None:
             QMessageBox.information(self, "AssetHub", "A job is running. Cancel or wait before cleanup.")
+            try:
+                self.context.log.warn("Cleanup missing blocked: job is running")
+            except Exception:
+                pass
             return
 
         conn = self.context.db_connection
         if conn is None:
             QMessageBox.warning(self, "AssetHub", "Database is not available.")
+            try:
+                self.context.log.error("Cleanup missing failed: database is not available")
+            except Exception:
+                pass
             return
 
         row = conn.execute("SELECT COUNT(*) FROM file WHERE UPPER(integrity_state)='MISSING';").fetchone()
@@ -288,6 +334,10 @@ class ScanTab(QWidget):
 
         if missing_count <= 0:
             QMessageBox.information(self, "AssetHub", "No MISSING records were found in the database.")
+            try:
+                self.context.log.info("Cleanup missing: no MISSING records")
+            except Exception:
+                pass
             return
 
         confirm = QMessageBox.question(
@@ -300,6 +350,10 @@ class ScanTab(QWidget):
             ),
         )
         if confirm != QMessageBox.StandardButton.Yes:
+            try:
+                self.context.log.info("Cleanup missing canceled")
+            except Exception:
+                pass
             return
 
         deleted = purge_all_missing_file_records(conn)
@@ -320,6 +374,10 @@ class ScanTab(QWidget):
     def _start_job(self, job_name: str, fn: Callable[[Event], Any]) -> None:
         if self._current_job is not None:
             QMessageBox.information(self, "AssetHub", "A job is already running. Press ESC to cancel it.")
+            try:
+                self.context.log.warn(f"Start job blocked: already running ({self._current_job})")
+            except Exception:
+                pass
             return
 
         if self.context.thread_pool is None:

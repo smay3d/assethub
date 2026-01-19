@@ -6,6 +6,8 @@ import os
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from assethub.core.db.schema import initialize_schema
 from assethub.core.storage.roots import StorageManager
 
@@ -124,8 +126,5 @@ def test_remove_root_from_tracking_disallows_unmanaged(tmp_path) -> None:
     sm = StorageManager(conn)
     unmanaged = sm.ensure_unmanaged_storage()
 
-    try:
+    with pytest.raises(ValueError):
         sm.remove_root_from_tracking(int(unmanaged.id))
-        assert False, "Expected ValueError"
-    except ValueError:
-        pass

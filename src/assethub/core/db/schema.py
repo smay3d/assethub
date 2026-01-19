@@ -1,17 +1,52 @@
 # src/assethub/core/db/schema.py
 
+"""SQLite schema and migrations.
+
+`initialize_schema()` is safe to call on every startup. It:
+
+1) Ensures tables/indices exist.
+2) Applies forward-only migrations (monotonic, idempotent).
+3) Records applied schema versions in the `schema_version` table.
+
+Migration pattern:
+  - Add a new `_migrate_to_vN()` function.
+  - Register it in `_MIGRATIONS`.
+  - Bump `LATEST_SCHEMA_VERSION`.
+
+Notes:
+  - A "file record" refers to a row in the `file` table.
+  - A "file on disk" refers to the actual filesystem entry.
+"""
+
 from __future__ import annotations
 
 import sqlite3
+from typing import Callable, Dict
+
+
+LATEST_SCHEMA_VERSION = 2
+
+
+def get_schema_version(conn: sqlite3.Connection) -> int:
+    """Return the current schema version as recorded in `schema_version`.
+
+    Returns:
+        Highest recorded version, or 0 if the version table is empty/missing.
+    """
+    try:
+        row = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()
+    except Exception:
+        return 0
+    if not row or row[0] is None:
+        return 0
+    try:
+        return int(row[0])
+    except Exception:
+        return 0
 
 
 def initialize_schema(conn: sqlite3.Connection) -> None:
-    """
-    Create the minimal v0 schema (storage, asset, version, file, tag, asset_tag).
-
-    Stage 6.1: implement schema DDL with idempotent creation.
-    This function is safe to call on every startup.
-    """
+    """Ensure the DB schema exists and is migrated to the latest version."""
 
     # Ensure FK constraints are enforced.
     conn.execute("PRAGMA foreign_keys = ON;")
@@ -82,41 +117,53 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
 
     conn.executescript(ddl)
 
-    # ---
-    # Schema versioning + migrations
-    # ---
-    # Stage 7.6.2 introduces storage.display_name and bumps schema version to 2.
-    latest_version = 2
-
-    row = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()
-    current = row[0] if row else None
-
-    if current is None:
+    current = get_schema_version(conn)
+    if current == 0:
         # Fresh DB: record the latest schema version.
-        conn.execute("INSERT INTO schema_version(version) VALUES (?);", (int(latest_version),))
+        conn.execute("INSERT INTO schema_version(version) VALUES (?);", (int(LATEST_SCHEMA_VERSION),))
         conn.commit()
         return
 
-    try:
-        current_i = int(current)
-    except Exception:
-        current_i = 0
+    # If a DB reports a version newer than this code knows, do not attempt to "downgrade".
+    if int(current) >= int(LATEST_SCHEMA_VERSION):
+        conn.commit()
+        return
 
-    if current_i < 2:
-        _migrate_to_v2(conn)
-
+    _apply_migrations(conn, from_version=int(current), to_version=int(LATEST_SCHEMA_VERSION))
     conn.commit()
 
 
-def _migrate_to_v2(conn: sqlite3.Connection) -> None:
-    """Stage 7.6.2 migration.
+def _apply_migrations(conn: sqlite3.Connection, *, from_version: int, to_version: int) -> None:
+    """Apply registered migrations in order."""
+    cur = int(from_version)
+    target = int(to_version)
+    while cur < target:
+        next_v = cur + 1
+        fn = _MIGRATIONS.get(next_v)
+        if fn is None:
+            raise RuntimeError(f"Missing migration for schema v{next_v}")
+        fn(conn)
+        cur = next_v
 
-    Adds storage.display_name (nullable) and records schema_version 2.
+
+def _record_schema_version(conn: sqlite3.Connection, version: int) -> None:
+    """Record an applied schema version."""
+    conn.execute("INSERT INTO schema_version(version) VALUES (?);", (int(version),))
+
+
+def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+    """Migrate to schema v2.
+
+    v2 adds `storage.display_name` (nullable) and records schema_version 2.
     """
     # Guard against partial/hand-modified DBs.
     cols = [str(r[1]) for r in conn.execute("PRAGMA table_info(storage);").fetchall()]
     if "display_name" not in cols:
         conn.execute("ALTER TABLE storage ADD COLUMN display_name TEXT;")
 
-    conn.execute("INSERT INTO schema_version(version) VALUES (2);")
-    conn.commit()
+    _record_schema_version(conn, 2)
+
+
+_MIGRATIONS: Dict[int, Callable[[sqlite3.Connection], None]] = {
+    2: _migrate_to_v2,
+}

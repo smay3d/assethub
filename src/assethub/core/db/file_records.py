@@ -75,11 +75,20 @@ def fetch_file_records(conn: sqlite3.Connection, file_ids: Iterable[int]) -> Lis
 
 
 def fetch_missing_file_ids(conn: sqlite3.Connection) -> List[int]:
+    """Return file ids for records currently marked MISSING."""
     rows = conn.execute("SELECT id FROM file WHERE UPPER(integrity_state)='MISSING' ORDER BY id;").fetchall()
     return [int(r[0]) for r in rows]
 
 
 def delete_file_records(conn: sqlite3.Connection, file_ids: Iterable[int]) -> int:
+    """Delete file records by id.
+
+    Notes:
+        This is a DB-only operation. It does not delete any files on disk.
+
+    Returns:
+        Number of deleted rows.
+    """
     ids = [int(x) for x in file_ids]
     if not ids:
         return 0
@@ -119,7 +128,11 @@ def delete_missing_file_records(conn: sqlite3.Connection, file_ids: Iterable[int
 
 
 def purge_all_missing_file_records(conn: sqlite3.Connection) -> int:
-    """Delete all file rows currently marked MISSING."""
+    """Delete all file records currently marked MISSING (DB-only).
+
+    Returns:
+        Number of deleted rows.
+    """
     before = conn.total_changes
     conn.execute("DELETE FROM file WHERE UPPER(integrity_state)='MISSING';")
     conn.commit()

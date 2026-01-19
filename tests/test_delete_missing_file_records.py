@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 
 def test_delete_missing_file_records_requires_missing(tmp_path: Path) -> None:
     """Stage 7.5.3: DB delete helper should only delete when all are MISSING."""
@@ -43,12 +45,9 @@ def test_delete_missing_file_records_requires_missing(tmp_path: Path) -> None:
         ok_id = id_by_rel["ok.txt"]
         missing_id = id_by_rel["missing.txt"]
 
-        # Mixed selection should be rejected
-        try:
+        # Mixed selection should be rejected.
+        with pytest.raises(ValueError):
             delete_missing_file_records(conn, [ok_id, missing_id])
-            assert False, "Expected ValueError for mixed states"
-        except ValueError:
-            pass
 
         # Missing-only should delete
         deleted = delete_missing_file_records(conn, [missing_id])
