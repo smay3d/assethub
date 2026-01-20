@@ -31,8 +31,8 @@ def test_settings_snapshot_refresh_smoke(tmp_path: Path) -> None:
     snap = collect_settings_snapshot(ctx)
 
     assert snap.about["app_version"] != ""
-    # schema_version may be "" during early init, or "2" after schema init.
-    assert snap.about["schema_version"] in {"", "2"}
+    # schema_version may be "" during early init, or "3" after schema init.
+    assert snap.about["schema_version"] in {"", "3"}
 
     # Sanity: ui behavior keys present
     assert isinstance(snap.ui_behavior["library_row_cap"], int)

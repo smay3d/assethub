@@ -20,7 +20,7 @@ from .core.health.checker import HealthChecker
 from .core.events.event_hub import EventHub
 from .core.utils.app_log import AppLog
 from .core.db.connection import get_connection
-from .core.db.schema import initialize_schema
+from .core.db.schema import initialize_schema, get_schema_version
 
 
 @dataclass
@@ -87,6 +87,12 @@ class AppContext:
         # Database (open connection and ensure minimal schema)
         self.db_connection = get_connection(self.config.db_path)
         initialize_schema(self.db_connection)
+        try:
+            schema_v = get_schema_version(self.db_connection)
+            self.log.info(f"DB schema ready (v{schema_v})")
+        except Exception:
+            # Logging must never prevent startup.
+            self.log.info("DB schema ready")
 
         # Storage and indexing
         self.storage_manager = StorageManager(self.db_connection)

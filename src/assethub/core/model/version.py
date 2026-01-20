@@ -9,4 +9,8 @@ from dataclasses import dataclass
 class Version:
     id: int
     asset_id: int
-    semver: str
+    label: str
+    sort_key: int
+    scheme: str
+    created_at: str  # ISO8601, refine later
+    updated_at: str  # ISO8601, refine later
