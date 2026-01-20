@@ -10,6 +10,7 @@ from PySide6.QtCore import QItemSelectionModel, QSortFilterProxyModel, Qt, Signa
 from PySide6.QtWidgets import QMessageBox
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QHBoxLayout,
@@ -18,7 +19,9 @@ from PySide6.QtWidgets import (
     QMenu,
     QPushButton,
     QSplitter,
+    QStackedWidget,
     QTableView,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -28,6 +31,7 @@ from assethub.core.db.schema import initialize_schema
 from assethub.ui.models.file_table_model import FileRow, FileTableModel
 from assethub.ui.ui_constants import LIBRARY_CAP_ROWS
 from assethub.ui.views.file_detail_pane import FileDetailPane, compute_absolute_path
+from assethub.ui.views.assets_library_widget import AssetsLibraryWidget
 from assethub.core.events.event_hub import DbChanged
 from assethub.ui.actions.library_actions import LibraryActions
 
@@ -149,6 +153,10 @@ class LibraryTab(QWidget):
         super().__init__()
         self.context = context
 
+        # Stage 8.5: Library view mode (Files | Assets)
+        self._mode: str = "files"  # 'files' or 'assets'
+
+
         self.model = FileTableModel()
         self.proxy = FileFilterProxyModel()
         self.proxy.setSourceModel(self.model)
@@ -196,6 +204,27 @@ class LibraryTab(QWidget):
 
         # Top controls
         top = QHBoxLayout()
+
+        # Stage 8.5: Files | Assets toggle
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.setExclusive(True)
+
+        self.btn_mode_files = QToolButton(self)
+        self.btn_mode_files.setText("Files")
+        self.btn_mode_files.setCheckable(True)
+        self.btn_mode_files.setChecked(True)
+
+        self.btn_mode_assets = QToolButton(self)
+        self.btn_mode_assets.setText("Assets")
+        self.btn_mode_assets.setCheckable(True)
+
+        self._mode_group.addButton(self.btn_mode_files, 0)
+        self._mode_group.addButton(self.btn_mode_assets, 1)
+
+        top.addWidget(QLabel("View:"))
+        top.addWidget(self.btn_mode_files)
+        top.addWidget(self.btn_mode_assets)
+
         self.search_edit = QLineEdit(self)
         self.search_edit.setPlaceholderText("Search filename or path…")
 
@@ -214,7 +243,12 @@ class LibraryTab(QWidget):
         top.addWidget(self.btn_refresh)
         root.addLayout(top)
 
-        # Master–detail split view
+        # Stage 8.5: stacked views for Files / Assets
+        self.stack = QStackedWidget(self)
+        root.addWidget(self.stack, stretch=1)
+
+        # Master–detail split view (Files mode)
+        
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
 
         left = QWidget(self.splitter)
@@ -245,7 +279,11 @@ class LibraryTab(QWidget):
         self.splitter.setStretchFactor(0, 3)
         self.splitter.setStretchFactor(1, 2)
 
-        root.addWidget(self.splitter, stretch=1)
+        self.stack.addWidget(self.splitter)
+
+        # Assets mode widget
+        self.assets_widget = AssetsLibraryWidget(self.context, self)
+        self.stack.addWidget(self.assets_widget)
 
         # Restore splitter state (if available), otherwise use default ratios.
         self._restore_splitter_state()
@@ -256,6 +294,8 @@ class LibraryTab(QWidget):
         self._update_status_label()
 
     def _wire_events(self) -> None:
+        self._mode_group.idClicked.connect(self._on_mode_changed)
+
         self.btn_refresh.clicked.connect(self.refresh)
         self.search_edit.textChanged.connect(self._on_search_changed)
         self.chk_show_hidden.toggled.connect(lambda _v: self._apply_column_visibility())
@@ -280,22 +320,47 @@ class LibraryTab(QWidget):
         self.table.customContextMenuRequested.connect(self._on_context_menu_requested)
 
     def _on_search_changed(self, text: str) -> None:
+        if self._mode == "assets":
+            self.assets_widget.set_search_text(text)
+            return
         self.proxy.set_search_text(text)
         self._update_status_label()
 
-    # -----------------
+    
+
+    def _on_mode_changed(self, mode_id: int) -> None:
+        """Handle Files | Assets mode toggle."""
+        self._mode = "files" if int(mode_id) == 0 else "assets"
+        self.stack.setCurrentIndex(0 if self._mode == "files" else 1)
+
+        # Files-only controls
+        is_files = self._mode == "files"
+        self.integrity_combo.setEnabled(is_files)
+        self.chk_show_hidden.setEnabled(is_files)
+
+        # Refresh current mode
+        self.refresh()
+# -----------------
     # Public API
     # -----------------
 
     def refresh(self) -> None:
-        """Reload the table from the database."""
-        prev_selected_ids = list(self._selected_file_ids)
-        prev_current_id = self._current_file_id
+        """Reload the current Library mode from the database."""
         conn = self.context.db_connection
         if conn is None:
             raise RuntimeError("AppContext db_connection is not initialized")
 
         initialize_schema(conn)
+
+        # Assets mode: delegate to the Assets widget (read-only).
+        if self._mode == "assets":
+            self.assets_widget.set_storage_id(self._current_storage_filter())
+            self.assets_widget.set_search_text(self.search_edit.text())
+            self.assets_widget.refresh()
+            return
+
+        prev_selected_ids = list(self._selected_file_ids)
+        prev_current_id = self._current_file_id
 
         # Count total rows first (for footer).
         total_row = conn.execute("SELECT COUNT(*) FROM file;").fetchone()
@@ -399,10 +464,16 @@ class LibraryTab(QWidget):
         self._on_integrity_filter_changed()
 
     def _on_storage_filter_changed(self) -> None:
+        if self._mode == "assets":
+            self.assets_widget.set_storage_id(self._current_storage_filter())
+            self.assets_widget.refresh()
+            return
         self.proxy.set_storage_id(self._current_storage_filter())
         self._update_status_label()
 
     def _on_integrity_filter_changed(self) -> None:
+        if self._mode == "assets":
+            return
         self.proxy.set_integrity(self._current_integrity_filter())
         self._update_status_label()
 
