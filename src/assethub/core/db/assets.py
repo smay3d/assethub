@@ -24,6 +24,7 @@ def create_asset(
     key: str,
     name: str,
     slug: Optional[str] = None,
+    commit: bool = True,
 ) -> Asset:
     """Create-or-fetch an asset by its storage-scoped identity.
 
@@ -63,7 +64,8 @@ def create_asset(
         """,
         (sid, t, k, n, slug),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
     row = conn.execute(
         """

@@ -5,11 +5,12 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from threading import Event
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, List
 
 from PySide6.QtCore import QObject, QRunnable, Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -31,6 +32,10 @@ from assethub.core.health.checker import HealthChecker
 from assethub.core.scanner.scanner import Scanner
 from assethub.core.storage.roots import StorageManager, StorageRoot
 from assethub.core.events.event_hub import DbChanged, ScanFinished, HealthFinished
+from assethub.core.detection.rules_loader import load_detection_ruleset
+from assethub.core.detection.engine import detect_proposals_for_storage
+from assethub.core.detection.apply import apply_detection_proposals
+from assethub.ui.dialogs.detect_assets_dialog import DetectAssetsDialog
 
 
 class _WorkerSignals(QObject):
@@ -117,6 +122,7 @@ class ScanTab(QWidget):
         self.roots_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.roots_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.roots_table.customContextMenuRequested.connect(self._on_roots_context_menu)
+        self.roots_table.itemSelectionChanged.connect(self._update_action_button_states)
         self.roots_table.horizontalHeader().setStretchLastSection(True)
         self.roots_table.setColumnHidden(0, True)  # hide ID
         root_layout.addWidget(self.roots_table)
@@ -136,12 +142,15 @@ class ScanTab(QWidget):
         actions_row = QHBoxLayout()
         self.btn_scan = QPushButton("Scan Roots")
         self.btn_health = QPushButton("Run Health Check")
+        self.btn_detect_assets = QPushButton("Detect Assets…")
         self.btn_cleanup_missing = QPushButton("Cleanup MISSING Files")
         self.btn_scan.clicked.connect(self._on_scan)
         self.btn_health.clicked.connect(self._on_health_check)
+        self.btn_detect_assets.clicked.connect(self._on_detect_assets)
         self.btn_cleanup_missing.clicked.connect(self._on_cleanup_missing)
         actions_row.addWidget(self.btn_scan)
         actions_row.addWidget(self.btn_health)
+        actions_row.addWidget(self.btn_detect_assets)
         actions_row.addWidget(self.btn_cleanup_missing)
         actions_row.addStretch(1)
         root_layout.addLayout(actions_row)
@@ -177,6 +186,7 @@ class ScanTab(QWidget):
             self._set_root_row(row, r)
 
         self.roots_table.resizeColumnsToContents()
+        self._update_action_button_states()
 
     # -------------------------
     # Slots
@@ -367,6 +377,156 @@ class ScanTab(QWidget):
                 DbChanged(reason="missing_records_purged", payload={"count": int(deleted)})
             )
 
+    @Slot()
+    def _on_detect_assets(self) -> None:
+        """Preview and apply asset detection proposals for the selected root."""
+
+        if self._current_job is not None:
+            QMessageBox.information(self, "AssetHub", "A job is running. Cancel or wait before detecting assets.")
+            try:
+                self.context.log.warn("Detect assets blocked: job is running")
+            except Exception:
+                pass
+            return
+
+        root = self._get_selected_storage_root()
+        if root is None:
+            QMessageBox.information(self, "AssetHub", "Select a storage root first.")
+            return
+        if root.root_path is None or str(root.status).upper() == StorageManager.UNMANAGED_STATUS:
+            QMessageBox.information(self, "AssetHub", "Select a non-Unmanaged storage root to detect assets.")
+            return
+
+        conn = self.context.db_connection
+        if conn is None:
+            QMessageBox.warning(self, "AssetHub", "Database is not available.")
+            return
+
+        # Load detection rules (user override preferred; falls back to bundled defaults).
+        rules = load_detection_ruleset(
+            data_root=self.context.config.data_root,
+            rules_root=getattr(self.context.config, "rules_root", None),
+        )
+
+        detection = detect_proposals_for_storage(conn, storage_id=int(root.id), rules=rules)
+        if not detection.proposals:
+            QMessageBox.information(self, "AssetHub", "No asset proposals were found for this root.")
+            try:
+                self.context.log.info(f"Detect assets: 0 proposals for storage_id={int(root.id)}")
+            except Exception:
+                pass
+            return
+
+        # Build a file id -> relative path map for display.
+        all_file_ids: List[int] = []
+        seen: set[int] = set()
+        for p in detection.proposals:
+            for fid in p.file_ids:
+                if int(fid) <= 0 or int(fid) in seen:
+                    continue
+                seen.add(int(fid))
+                all_file_ids.append(int(fid))
+
+        file_map: dict[int, str] = {}
+        if all_file_ids:
+            ph = ",".join(["?"] * len(all_file_ids))
+            rows = conn.execute(
+                f"SELECT id, relative_path FROM file WHERE id IN ({ph});",
+                tuple(all_file_ids),
+            ).fetchall()
+            file_map = {int(r[0]): str(r[1]) for r in rows}
+
+        storage_label = f"{root.display_name or root.name} (id={int(root.id)})"
+        dlg = DetectAssetsDialog(
+            parent=self,
+            storage_label=storage_label,
+            detection=detection,
+            file_id_to_relpath=file_map,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            try:
+                self.context.log.info("Detect assets: canceled")
+            except Exception:
+                pass
+            return
+
+        apply_items = dlg.build_apply_items()
+        if not apply_items:
+            QMessageBox.information(self, "AssetHub", "No files were selected. Nothing to apply.")
+            return
+
+        try:
+            res = apply_detection_proposals(conn, storage_id=int(root.id), items=apply_items)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "AssetHub", f"Failed to apply proposals:\n\n{exc}")
+            try:
+                self.context.log.error(f"Detect assets apply failed: {exc}")
+            except Exception:
+                pass
+            return
+
+        try:
+            self.context.log.info(
+                "Detect assets applied: "
+                f"created_assets={res.created_assets}, created_versions={res.created_versions}, "
+                f"attached_files={res.attached_files}, skipped_owned={res.skipped_owned}"
+            )
+            for s in res.summaries:
+                self.context.log.info(s)
+        except Exception:
+            pass
+
+        self.context.event_hub.db_changed.emit(
+            DbChanged(
+                reason="detect_assets_applied",
+                payload={
+                    "storage_id": int(root.id),
+                    "created_assets": int(res.created_assets),
+                    "created_versions": int(res.created_versions),
+                    "attached_files": int(res.attached_files),
+                    "skipped_owned": int(res.skipped_owned),
+                },
+            )
+        )
+
+        QMessageBox.information(
+            self,
+            "AssetHub",
+            (
+                "Detection proposals applied.\n\n"
+                f"Assets created: {res.created_assets}\n"
+                f"Versions created: {res.created_versions}\n"
+                f"Files attached: {res.attached_files}\n"
+                f"Skipped owned: {res.skipped_owned}"
+            ),
+        )
+
+    def _get_selected_storage_root(self) -> Optional[StorageRoot]:
+        """Return the currently selected StorageRoot, if any."""
+        selected = self.roots_table.selectionModel().selectedRows()
+        if not selected:
+            return None
+        row = selected[0].row()
+        sid = self._root_id_for_row(row)
+        if sid is None:
+            return None
+        sm = self._require_storage_manager()
+        roots = {r.id: r for r in sm.list_roots()}
+        return roots.get(int(sid))
+
+    def _update_action_button_states(self) -> None:
+        """Enable/disable UI actions based on selection and busy state."""
+        if self._current_job is not None:
+            self.btn_detect_assets.setEnabled(False)
+            return
+        root = self._get_selected_storage_root()
+        enable_detect = bool(
+            root is not None
+            and root.root_path is not None
+            and str(root.status).upper() != StorageManager.UNMANAGED_STATUS
+        )
+        self.btn_detect_assets.setEnabled(enable_detect)
+
     # -------------------------
     # Job control
     # -------------------------
@@ -476,7 +636,10 @@ class ScanTab(QWidget):
         self.btn_remove_root.setEnabled(not busy)
         self.btn_scan.setEnabled(not busy)
         self.btn_health.setEnabled(not busy)
+        self.btn_detect_assets.setEnabled(False if busy else self.btn_detect_assets.isEnabled())
         self.btn_cleanup_missing.setEnabled(not busy)
+        if not busy:
+            self._update_action_button_states()
 
     # -------------------------
     # Background task implementations

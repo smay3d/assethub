@@ -141,6 +141,10 @@ def attach_files_to_version(
     version_id: int,
     file_ids: Sequence[int],
     enforce_unowned: bool = False,
+    use_transaction: bool = True,
+    write_log: bool = True,
+    action_type: str = "attach",
+    payload_extra: Optional[Dict[str, Any]] = None,
 ) -> AttachResult:
     """Attach files to a version.
 
@@ -182,7 +186,11 @@ def attach_files_to_version(
             moved_from.append({"file_id": fid, "from_version_id": int(cur_vid)})
         to_attach.append(fid)
 
-    with conn:
+    log_id = 0
+    summary = ""
+
+    def _apply() -> None:
+        nonlocal log_id, summary
         if to_attach:
             conn.execute(
                 f"UPDATE file SET version_id=?, updated_at=CURRENT_TIMESTAMP WHERE id IN ({_ph(len(to_attach))});",
@@ -203,6 +211,8 @@ def attach_files_to_version(
             notes.append("Some files were reassigned from other versions.")
         if notes:
             payload["notes"] = notes
+        if payload_extra:
+            payload.update(payload_extra)
 
         moved_n = len(moved_from)
         suffix_bits: List[str] = []
@@ -218,13 +228,21 @@ def attach_files_to_version(
             suffix = " (" + ", ".join(suffix_bits) + ")"
         summary = f"Attached {len(to_attach)} files → version {vid}{suffix}"
 
-        log_id = write_version_change_log(
-            conn,
-            version_id=vid,
-            action_type="attach",
-            summary=summary,
-            payload=payload,
-        )
+        if write_log:
+            at = str(action_type).strip() or "attach"
+            log_id = write_version_change_log(
+                conn,
+                version_id=vid,
+                action_type=at,
+                summary=summary,
+                payload=payload,
+            )
+
+    if use_transaction:
+        with conn:
+            _apply()
+    else:
+        _apply()
 
     return AttachResult(
         attached=len(to_attach),

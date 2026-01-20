@@ -36,6 +36,7 @@ def create_version(
     asset_id: int,
     label: Optional[str] = None,
     scheme: str = "vNN",
+    commit: bool = True,
 ) -> Version:
     """Create a new version for an asset.
 
@@ -63,7 +64,8 @@ def create_version(
         """,
         (aid, lbl, int(next_sort), str(scheme).strip() or "vNN"),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
     vid = conn.execute("SELECT last_insert_rowid();").fetchone()[0]
     return get_version(conn, int(vid))  # type: ignore[return-value]
