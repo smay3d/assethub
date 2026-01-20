@@ -8,6 +8,8 @@ data snapshot that the UI can render.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import os
 import platform
 import sys
@@ -65,6 +67,7 @@ def _collect_paths(ctx: AppContext) -> dict[str, str]:
         "sidecar_root": cfg.sidecar_root or "",
         "preview_root": cfg.preview_root or "",
         "log_root": cfg.log_root or "",
+        "rules_root": (cfg.rules_root or str(Path(cfg.data_root) / "rules")) if cfg.data_root else (cfg.rules_root or ""),
     }
 
 

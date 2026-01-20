@@ -36,6 +36,7 @@ class AppConfig:
     sidecar_root: str
     preview_root: str
     log_root: str
+    rules_root: str = ""
     ui: Dict[str, Any] = field(default_factory=dict)
 
 

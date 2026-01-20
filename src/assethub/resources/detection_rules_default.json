@@ -1,0 +1,48 @@
+{
+  "excluded_exts": [
+    "tx",
+    "rat"
+  ],
+  "image_sequence": {
+    "separators": [
+      ".",
+      "_",
+      "-"
+    ],
+    "min_digits": 3
+  },
+  "texture_set": {
+    "separators": [
+      "_",
+      "-",
+      "."
+    ],
+    "channel_tokens": [
+      "albedo",
+      "diffuse",
+      "basecolor",
+      "color",
+      "normal",
+      "nrm",
+      "roughness",
+      "rough",
+      "metallic",
+      "metal",
+      "specular",
+      "spec",
+      "height",
+      "disp",
+      "displacement",
+      "ao",
+      "ambientocclusion",
+      "opacity",
+      "alpha",
+      "emissive",
+      "emit"
+    ],
+    "min_files": 2
+  },
+  "generic": {
+    "group_by_stem": true
+  }
+}
