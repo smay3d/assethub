@@ -411,8 +411,8 @@ Stage 8 introduces asset-level semantics on top of the Stage 7 file-level founda
 - “Project” directories with enforced conventions (Stage 9; would impact no-write policy)
 
 ### Stage 8 Plan Document
-- See: **AssetHub_Stage8_Plan_v0.1.md** (detailed sub-stage plan)
-
+- See: **AssetHub_Stage8_Plan_v0.2.md** (detailed sub-stage plan)
+	- Version bump v0.1 -> v0.2: 8.6 repurposed from wrap-up to UI cleanup; wrap-up moved to 8.C.
 ---
 
 *This document acts as the authoritative design reference for the project’s current state.*

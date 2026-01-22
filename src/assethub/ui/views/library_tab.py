@@ -156,6 +156,10 @@ class LibraryTab(QWidget):
         # Stage 8.5: Library view mode (Files | Assets)
         self._mode: str = "files"  # 'files' or 'assets'
 
+        # Stage 8.6: persist last selection per mode (assets)
+        self._assets_last_asset_id: Optional[int] = None
+        self._assets_last_version_id: Optional[int] = None
+
 
         self.model = FileTableModel()
         self.proxy = FileFilterProxyModel()
@@ -298,7 +302,7 @@ class LibraryTab(QWidget):
 
         self.btn_refresh.clicked.connect(self.refresh)
         self.search_edit.textChanged.connect(self._on_search_changed)
-        self.chk_show_hidden.toggled.connect(lambda _v: self._apply_column_visibility())
+        self.chk_show_hidden.toggled.connect(self._on_show_hidden_changed)
 
         self.storage_combo.currentIndexChanged.connect(self._on_storage_filter_changed)
         self.integrity_combo.currentIndexChanged.connect(self._on_integrity_filter_changed)
@@ -326,17 +330,30 @@ class LibraryTab(QWidget):
         self.proxy.set_search_text(text)
         self._update_status_label()
 
+    def _on_show_hidden_changed(self, _checked: bool) -> None:
+        self._apply_column_visibility()
+
     
 
     def _on_mode_changed(self, mode_id: int) -> None:
         """Handle Files | Assets mode toggle."""
+        # Persist last selection per mode before switching.
+        if self._mode == "assets":
+            try:
+                a_sel = self.assets_widget.get_selection()
+                self._assets_last_asset_id = a_sel.asset_id
+                self._assets_last_version_id = a_sel.version_id
+            except Exception:
+                pass
+
         self._mode = "files" if int(mode_id) == 0 else "assets"
         self.stack.setCurrentIndex(0 if self._mode == "files" else 1)
 
-        # Files-only controls
-        is_files = self._mode == "files"
-        self.integrity_combo.setEnabled(is_files)
-        self.chk_show_hidden.setEnabled(is_files)
+        # Controls remain available in both modes.
+        # - Integrity filter in Assets mode maps to missing_count (OK vs MISSING).
+        # - Show hidden columns toggles internal columns in the active view.
+        self.integrity_combo.setEnabled(True)
+        self.chk_show_hidden.setEnabled(True)
 
         # Refresh current mode
         self.refresh()
@@ -356,6 +373,14 @@ class LibraryTab(QWidget):
         if self._mode == "assets":
             self.assets_widget.set_storage_id(self._current_storage_filter())
             self.assets_widget.set_search_text(self.search_edit.text())
+            self.assets_widget.set_integrity_filter(self._current_integrity_filter())
+            self.assets_widget.set_show_hidden_columns(bool(self.chk_show_hidden.isChecked()))
+            # Restore last selection (if any) before refresh.
+            if self._assets_last_asset_id is not None:
+                self.assets_widget.set_pending_restore(
+                    asset_id=self._assets_last_asset_id,
+                    version_id=self._assets_last_version_id,
+                )
             self.assets_widget.refresh()
             return
 
@@ -422,10 +447,6 @@ class LibraryTab(QWidget):
         # Ensure detail pane reflects restored selection.
         self._sync_detail_pane()
 
-    def _on_search_changed(self, text: str) -> None:
-        self.proxy.set_search_text(text)
-        self._update_status_label()
-
     # -----------------
     # Filters
     # -----------------
@@ -473,6 +494,8 @@ class LibraryTab(QWidget):
 
     def _on_integrity_filter_changed(self) -> None:
         if self._mode == "assets":
+            self.assets_widget.set_integrity_filter(self._current_integrity_filter())
+            # no refresh needed; proxy filtering is dynamic
             return
         self.proxy.set_integrity(self._current_integrity_filter())
         self._update_status_label()
@@ -498,6 +521,10 @@ class LibraryTab(QWidget):
 
     def _apply_column_visibility(self) -> None:
         show_hidden = bool(self.chk_show_hidden.isChecked())
+        if self._mode == "assets":
+            self.assets_widget.set_show_hidden_columns(show_hidden)
+            return
+
         for idx, col in enumerate(self.model.columns):
             hide = (not col.default_visible) and (not show_hidden)
             self.table.setColumnHidden(idx, hide)

@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence
 
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import Qt, Slot, QEvent, QObject
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -135,10 +135,21 @@ class DetectAssetsDialog(QDialog):
         left_layout.setContentsMargins(0, 0, 0, 0)
 
         self.list_proposals = QListWidget(left)
-        self.list_proposals.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.list_proposals.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.list_proposals.currentRowChanged.connect(self._on_select_proposal)
         left_layout.addWidget(QLabel("Proposals"))
         left_layout.addWidget(self.list_proposals, 1)
+
+        # Bulk proposal enable/disable (multi-select).
+        bulk = QHBoxLayout()
+        self.btn_enable_selected = QPushButton("Enable Selected")
+        self.btn_disable_selected = QPushButton("Disable Selected")
+        self.btn_enable_selected.clicked.connect(self._on_enable_selected_proposals)
+        self.btn_disable_selected.clicked.connect(self._on_disable_selected_proposals)
+        bulk.addWidget(self.btn_enable_selected)
+        bulk.addWidget(self.btn_disable_selected)
+        bulk.addStretch(1)
+        left_layout.addLayout(bulk)
 
         splitter.addWidget(left)
 
@@ -175,7 +186,8 @@ class DetectAssetsDialog(QDialog):
         files_box = QGroupBox("Files", right)
         files_layout = QVBoxLayout(files_box)
         self.list_files = QListWidget(files_box)
-        self.list_files.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.list_files.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.list_files.installEventFilter(self)
         files_layout.addWidget(self.list_files, 1)
 
         btns = QHBoxLayout()
@@ -200,6 +212,7 @@ class DetectAssetsDialog(QDialog):
         self._btn_apply.clicked.connect(self._on_apply_clicked)
         self._btn_box.rejected.connect(self.reject)
         root.addWidget(self._btn_box)
+        self._update_apply_enabled()
 
     def _populate_list(self) -> None:
         self.list_proposals.clear()
@@ -238,6 +251,7 @@ class DetectAssetsDialog(QDialog):
         self.lbl_reason.setText(it.reason)
 
         self._populate_files(it)
+        self._update_apply_enabled()
 
     def _clear_detail(self) -> None:
         self._set_combo_value("generic")
@@ -245,9 +259,11 @@ class DetectAssetsDialog(QDialog):
         self.lbl_key.setText("-")
         self.lbl_reason.setText("-")
         self.list_files.clear()
+        self._update_apply_enabled()
 
     def _populate_files(self, it: _EditableProposal) -> None:
         self.list_files.clear()
+        self._update_apply_enabled()
         # Deterministic order by relative path, then id.
         fids = sorted(it.file_ids, key=lambda fid: (self._file_map.get(int(fid), ""), int(fid)))
         for fid in fids:
@@ -256,10 +272,42 @@ class DetectAssetsDialog(QDialog):
             cb.setProperty("file_id", int(fid))
             cb.setChecked(int(fid) in set(int(x) for x in it.selected_file_ids))
             cb.stateChanged.connect(self._on_file_checkbox_changed)
+            cb.installEventFilter(self)
             lw = QListWidgetItem(self.list_files)
             lw.setFlags(lw.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             self.list_files.addItem(lw)
             self.list_files.setItemWidget(lw, cb)
+
+        # Default focus/selection to first file so Space toggles work immediately.
+        if self.list_files.count() > 0 and self.list_files.currentRow() < 0:
+            self.list_files.setCurrentRow(0)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
+        """Keyboard shortcuts for the Files checklist.
+
+        - Space: toggle current file checkbox (when focus is on the list)
+        - Ctrl+A: select all files for the current proposal (list or checkbox focused)
+        """
+        if event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            mods = event.modifiers()
+
+            # Ctrl+A works from either the list or any checkbox widget.
+            if key == Qt.Key.Key_A and (mods & Qt.KeyboardModifier.ControlModifier):
+                self._on_select_all()
+                return True
+
+            # Space toggles the current checkbox when the list has focus.
+            if watched is self.list_files and key == Qt.Key.Key_Space:
+                row = self.list_files.currentRow()
+                if row >= 0:
+                    item = self.list_files.item(row)
+                    cb = self.list_files.itemWidget(item)
+                    if isinstance(cb, QCheckBox):
+                        cb.setChecked(not cb.isChecked())
+                        return True
+
+        return super().eventFilter(watched, event)
 
     def _current(self) -> Optional[_EditableProposal]:
         row = self.list_proposals.currentRow()
@@ -294,6 +342,7 @@ class DetectAssetsDialog(QDialog):
         self._refresh_list_row(self.list_proposals.currentRow())
         # Enforce demotion rule immediately if needed.
         self._enforce_texture_min_files(it)
+        self._update_apply_enabled()
 
     @Slot(int)
     def _on_file_checkbox_changed(self, _state: int) -> None:
@@ -317,6 +366,44 @@ class DetectAssetsDialog(QDialog):
         it.selected_file_ids = sorted(selected)
         self._refresh_list_row(self.list_proposals.currentRow())
         self._enforce_texture_min_files(it)
+        self._update_apply_enabled()
+
+    @Slot()
+    def _on_enable_selected_proposals(self) -> None:
+        rows = sorted({idx.row() for idx in self.list_proposals.selectedIndexes()})
+        if not rows:
+            return
+        current_row = self.list_proposals.currentRow()
+        for r in rows:
+            if 0 <= r < len(self._items):
+                it = self._items[r]
+                it.selected_file_ids = list(it.file_ids)
+                # Enforce demotion rule if needed.
+                self._enforce_texture_min_files(it)
+                self._refresh_list_row(r)
+        if current_row in rows:
+            cur = self._current()
+            if cur is not None:
+                self._populate_files(cur)
+        self._update_apply_enabled()
+
+    @Slot()
+    def _on_disable_selected_proposals(self) -> None:
+        rows = sorted({idx.row() for idx in self.list_proposals.selectedIndexes()})
+        if not rows:
+            return
+        current_row = self.list_proposals.currentRow()
+        for r in rows:
+            if 0 <= r < len(self._items):
+                it = self._items[r]
+                it.selected_file_ids = []
+                self._enforce_texture_min_files(it)
+                self._refresh_list_row(r)
+        if current_row in rows:
+            cur = self._current()
+            if cur is not None:
+                self._populate_files(cur)
+        self._update_apply_enabled()
 
     @Slot()
     def _on_select_all(self) -> None:
@@ -327,6 +414,7 @@ class DetectAssetsDialog(QDialog):
         self._populate_files(it)
         self._refresh_list_row(self.list_proposals.currentRow())
         self._enforce_texture_min_files(it)
+        self._update_apply_enabled()
 
     @Slot()
     def _on_select_none(self) -> None:
@@ -337,6 +425,7 @@ class DetectAssetsDialog(QDialog):
         self._populate_files(it)
         self._refresh_list_row(self.list_proposals.currentRow())
         self._enforce_texture_min_files(it)
+        self._update_apply_enabled()
 
     def _enforce_texture_min_files(self, it: _EditableProposal) -> None:
         if it.type != "texture_set":
@@ -351,6 +440,10 @@ class DetectAssetsDialog(QDialog):
     # -------------------------
     # Apply
     # -------------------------
+
+    def _update_apply_enabled(self) -> None:
+        any_selected = any(len(it.selected_file_ids) > 0 for it in self._items)
+        self._btn_apply.setEnabled(bool(any_selected))
 
     @Slot()
     def _on_apply_clicked(self) -> None:

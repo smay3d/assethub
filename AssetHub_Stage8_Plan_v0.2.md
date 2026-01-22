@@ -181,7 +181,20 @@ A migration record should be maintained separately (see schema migration record 
 
 ---
 
-### 8.6 — Settings + Docs Wrap
+### 8.6 — UI Cleanup
+**Goal:** Bug fixes and UI improvements to implemented features.
+
+**Deliverables**
+- 8.6.1 Assets view: selection reliability + search/filter + hidden/integrity handling + auto-select + persist per-mode + health derived from missing_count
+- 8.6.2 Context menus: assets list + files list in assets view
+- 8.6.3 Detect dialog: multi-select proposals + keyboard shortcuts (Space toggle, Ctrl+A) + disable Apply when no-op
+
+**Definition of Done**
+- Bug fix and feature additions from stage 8.1-8.5 human testing analysis addressed.
+
+---
+
+### 8.C — Settings + Docs Wrap
 **Goal:** Transparency and documentation.
 
 **Deliverables**
