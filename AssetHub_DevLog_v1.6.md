@@ -1,4 +1,4 @@
-# AssetHub Development Log (v1.5)
+# AssetHub Development Log (v1.6)
 
 This document records the concrete implementation progress of AssetHub.  
 It complements the main design document by describing *what has actually been built* at each stage.
@@ -299,3 +299,117 @@ Stage 7 exposes the Stage 6 backend through a usable, file-level UI. The focus i
 
 ### Stage 7 Outcome
 By the end of Stage 7, AssetHub provides a stable, developer-friendly file-level UI that exposes the Stage 6 backend end-to-end, and establishes the selection + action + signaling foundations needed to implement Stage 8 (asset semantics) without reworking the UI architecture.
+
+---
+
+## Stage 8 — Asset Semantics (Detection + Assets View)
+
+**Status:** Complete (Stages 8.0–8.6)
+
+**Dates:** 2026-01-19 to 2026-01-23
+
+**Tests:** Passing (pytest green; latest run: 33 passed, 2 skipped)
+
+### Overview
+Stage 8 transitions AssetHub from a file-only browser into an asset-aware system. It introduces schema v3, storage-scoped asset identity, version membership operations with change logging, a deterministic rules-based detection pipeline, and a new Assets mode in the Library tab. Stage 7 file workflows remain available and unchanged.
+
+---
+
+### 8.0 — Audit & Design (Docstrings + Tests + Logging Coverage)
+
+**Status:** Complete
+
+- Audited repo docstrings for consistency and alignment with current behavior.
+- Audited the test suite for deprecated assumptions and compatibility with Stage 8 plans.
+- Reviewed logging coverage expectations and kept refactors minimal prior to schema work.
+
+---
+
+### 8.1 — Schema v3 + DB Layer Core (Assets/Versions)
+
+**Status:** Complete
+
+- Bumped DB schema to **v3** and implemented safe, idempotent migrations.
+- Updated asset semantics to be **storage-scoped** (`asset.storage_id`, plus `type` and `key` as identity).
+- Rebuilt the `version` table for v3, including `sort_key` ordering and `label` display strings.
+- Added `version_change_log` for accountable history of membership operations.
+- Added `file.updated_at` to support future auditing and “what changed” inspection.
+- Introduced core DB helpers for asset and version creation/lookup and file→(asset, version) resolution.
+
+---
+
+### 8.2 — Version Membership Ops + Change Logging
+
+**Status:** Complete
+
+- Added transactional DB operations for version membership:
+  - attach files to version (optional unowned enforcement)
+  - detach files (optionally constrained to a version)
+  - repair membership (swap old→new)
+  - fork a new version from an existing one
+- Each operation records a `version_change_log` row with compact JSON payloads and a caller-friendly summary string.
+
+---
+
+### 8.3 — Detection Rules Loader + Proposal Engine (Preview Only)
+
+**Status:** Complete
+
+- Added a user-configurable rules path (`rules_root`) with a bundled defaults fallback (`detection_rules_default.json`).
+- Implemented deterministic detection proposal generation for a selected storage root:
+  - considers only **unowned** files (`file.version_id IS NULL`)
+  - always excludes `.tx` and `.rat`
+  - proposes `image_sequence`, `texture_set`, and `generic` groupings
+- Stage 8.3 performs **no DB writes** (proposal-only).
+
+---
+
+### 8.4 — Detect Assets Modal + Apply (DB Writes)
+
+**Status:** Complete
+
+- Added Scan tab action **Detect Assets…** (single-root selection).
+- Implemented a modal proposals dialog with:
+  - editable asset name
+  - type override
+  - per-proposal file checklist (with automatic texture_set→generic demotion if edited below 2 files)
+  - skipped-owned summary reporting
+- Implemented transactional apply:
+  - create asset (by storage/type/key)
+  - create `v01` version
+  - attach checked files (enforce unowned)
+  - write `version_change_log` rows (`action_type="detect_apply"`)
+- Emits EventHub refresh signals and writes concise summaries to the global log.
+
+---
+
+### 8.5 — Library Assets View (Files | Assets Toggle)
+
+**Status:** Complete
+
+- Added a Library mode toggle: **Files | Assets** (defaults to Files; Stage 7 behavior preserved).
+- Implemented asset browsing v0:
+  - asset list with counts and simple health summary (missing file count)
+  - versions list (sorted by `sort_key`)
+  - files list for the selected version
+
+---
+
+### 8.6 — UI Cleanup (Post-Integration Fixes)
+
+**Status:** Complete (8.6.1–8.6.3)
+
+- Fixed Assets view selection reliability (detail panes update consistently).
+- Made Search/Filter/Hidden-column features behave correctly in Assets mode.
+- Added context menus for:
+  - assets list (including “dissolve asset”)
+  - files list within Assets mode (reusing file-level actions)
+- Improved Detect Assets dialog usability:
+  - multi-select proposals enable/disable
+  - keyboard shortcuts for file checklist (Space toggle, Ctrl+A)
+  - Apply disabled when nothing would be applied
+
+---
+
+### Stage 8 Outcome
+By the end of Stage 8, AssetHub supports asset-aware workflows end-to-end: deterministic detection → review/edit proposals → apply into assets/versions with accountable logging → browse assets and versions in the Library, while preserving the original file-level workflow for debugging and maintenance.
