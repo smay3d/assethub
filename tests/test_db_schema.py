@@ -44,10 +44,10 @@ def test_initialize_schema_is_idempotent(tmp_path) -> None:
 
     row = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()
     assert row is not None
-    assert row[0] == 3
+    assert row[0] == 4
 
 
-def test_initialize_schema_migrates_v1_to_v3(tmp_path) -> None:
+def test_initialize_schema_migrates_v1_to_v4(tmp_path) -> None:
     """Migrating an existing v1-era DB should reach the latest schema."""
     db_path = tmp_path / "assethub_test.sqlite3"
     conn = sqlite3.connect(db_path)
@@ -98,13 +98,17 @@ def test_initialize_schema_migrates_v1_to_v3(tmp_path) -> None:
     tables = _get_tables(conn)
     assert "version_change_log" in tables
 
+    # v4: tag.color
+    tag_cols = [r[1] for r in conn.execute("PRAGMA table_info(tag);").fetchall()]
+    assert "color" in tag_cols
+
     row = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()
     assert row is not None
-    assert row[0] == 3
+    assert row[0] == 4
 
 
-def test_initialize_schema_migrates_v2_to_v3_and_preserves_ids(tmp_path) -> None:
-    """v2 -> v3 rebuilds should preserve ids (file.version_id stability)."""
+def test_initialize_schema_migrates_v2_to_v4_and_preserves_ids(tmp_path) -> None:
+    """v2 -> v4 rebuilds should preserve ids (file.version_id stability)."""
     db_path = tmp_path / "assethub_test.sqlite3"
     conn = sqlite3.connect(db_path)
 
@@ -195,7 +199,37 @@ def test_initialize_schema_migrates_v2_to_v3_and_preserves_ids(tmp_path) -> None
     assert row is not None
     assert row[0] == 5
 
-    # v3 bookkeeping.
+    # v4 bookkeeping.
     row = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()
     assert row is not None
-    assert row[0] == 3
+    assert row[0] == 4
+
+
+def test_initialize_schema_migrates_v3_to_v4_adds_tag_color(tmp_path) -> None:
+    db_path = tmp_path / "assethub_test.sqlite3"
+    conn = sqlite3.connect(db_path)
+
+    # Minimal v3-ish DB: schema_version==3 and a tag table without color.
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version     INTEGER NOT NULL,
+            applied_at  TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+        );
+        INSERT INTO schema_version(version) VALUES (3);
+
+        CREATE TABLE IF NOT EXISTS tag (
+            id      INTEGER PRIMARY KEY,
+            name    TEXT NOT NULL UNIQUE
+        );
+        """
+    )
+    conn.commit()
+
+    initialize_schema(conn)
+
+    tag_cols = [r[1] for r in conn.execute("PRAGMA table_info(tag);").fetchall()]
+    assert "color" in tag_cols
+    row = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()
+    assert row is not None
+    assert row[0] == 4

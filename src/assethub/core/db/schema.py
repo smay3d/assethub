@@ -24,7 +24,7 @@ import sqlite3
 from typing import Callable, Dict
 
 
-LATEST_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = 4
 
 
 def get_schema_version(conn: sqlite3.Connection) -> int:
@@ -121,7 +121,8 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
 
     CREATE TABLE IF NOT EXISTS tag (
         id      INTEGER PRIMARY KEY,
-        name    TEXT NOT NULL UNIQUE
+        name    TEXT NOT NULL UNIQUE,
+        color   TEXT NOT NULL DEFAULT '#808080'
     );
 
     CREATE TABLE IF NOT EXISTS asset_tag (
@@ -246,6 +247,22 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
 
     conn.execute("PRAGMA foreign_keys = ON;")
     _record_schema_version(conn, 3)
+
+
+def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+    """Migrate to schema v4.
+
+    v4 adds semantic tag colors:
+      - tag.color TEXT NOT NULL DEFAULT '#808080'
+
+    Migration is forward-only and idempotent.
+    """
+
+    cols = [str(r[1]) for r in conn.execute("PRAGMA table_info(tag);").fetchall()]
+    if "color" not in cols:
+        conn.execute("ALTER TABLE tag ADD COLUMN color TEXT NOT NULL DEFAULT '#808080';")
+
+    _record_schema_version(conn, 4)
 
 
 def _ensure_unmanaged_storage_row(conn: sqlite3.Connection) -> int:
@@ -461,4 +478,5 @@ def _ensure_file_updated_at(conn: sqlite3.Connection) -> None:
 _MIGRATIONS: Dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_to_v2,
     3: _migrate_to_v3,
+    4: _migrate_to_v4,
 }

@@ -9,3 +9,4 @@ from dataclasses import dataclass
 class Tag:
     id: int
     name: str
+    color: str = "#808080"

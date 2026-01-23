@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, List, Set, Tuple
+from typing import Optional, List, Set, Tuple, Dict
 
-from PySide6.QtCore import Qt, QSortFilterProxyModel, Signal, QItemSelectionModel
+from PySide6.QtCore import Qt, QSortFilterProxyModel, Signal, QItemSelectionModel, QEvent
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -24,9 +24,124 @@ from PySide6.QtWidgets import (
 from assethub.context import AppContext
 from assethub.core.events.event_hub import DbChanged
 from assethub.core.db.asset_library import AssetRow, list_assets, list_files_for_version, list_versions
+from assethub.core.db.tags import list_tags, list_tags_for_asset_ids, add_tags_to_assets, remove_tags_from_assets
+from assethub.core.model.tag import Tag
 from assethub.core.model.version import Version
 from assethub.ui.actions.library_actions import LibraryActions
+from assethub.ui.delegates.tag_chips_delegate import TagChipsDelegate, TAG_PAYLOAD_ROLE
+from assethub.ui.dialogs.tag_manager_dialog import TagManagerDialog
+from assethub.ui.dialogs.tag_select_dialog import TagSelectDialog
 from assethub.ui.utils.clipboard import set_clipboard_text
+
+class _NoCollapseOnRightClickTableView(QTableView):
+    """A QTableView that preserves multi-selection on right-click.
+
+    Qt can collapse multi-selection on right-click (often on mouse release or
+    context-menu dispatch). The Library file view solved this by short-circuiting
+    right-click presses on already-selected rows. In Assets view, platform/Qt
+    combos can still collapse selection later in the event chain.
+
+    This implementation uses a viewport event filter to reliably:
+      - Preserve selection when right-clicking an already-selected row
+      - Keep default behavior when right-clicking an unselected row
+      - Emit the custom context menu request for preserved-selection cases
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._preserve_selection: bool = False
+        self._saved_selected_rows: list = []
+        # Mouse events for item views arrive on the viewport.
+        self.viewport().installEventFilter(self)
+
+    def _is_row_selected(self, idx) -> bool:
+        if not idx.isValid():
+            return False
+        sel = self.selectionModel()
+        if sel is None:
+            return False
+        idx0 = idx.siblingAtColumn(0)
+        try:
+            return bool(sel.isRowSelected(idx.row(), idx.parent()) or sel.isSelected(idx0))
+        except Exception:
+            return bool(sel.isSelected(idx0))
+
+    def _snapshot_selection(self) -> None:
+        sel = self.selectionModel()
+        if sel is None:
+            self._saved_selected_rows = []
+            return
+        # Save proxy-model indices (as seen by the view), column 0 per row.
+        rows = sel.selectedRows(0)
+        self._saved_selected_rows = list(rows)
+
+    def _restore_selection(self) -> None:
+        sel = self.selectionModel()
+        if sel is None:
+            return
+        if not self._saved_selected_rows:
+            return
+        sel.clearSelection()
+        for idx in self._saved_selected_rows:
+            if idx.isValid():
+                sel.select(
+                    idx,
+                    QItemSelectionModel.SelectionFlag.Select
+                    | QItemSelectionModel.SelectionFlag.Rows,
+                )
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        # We only care about viewport events.
+        if watched is not self.viewport():
+            return super().eventFilter(watched, event)
+
+        et = event.type()
+
+        # Right mouse press: decide whether we preserve selection for this click.
+        if et == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.RightButton:
+                idx = self.indexAt(event.pos())
+                if self._is_row_selected(idx):
+                    self._preserve_selection = True
+                    self._snapshot_selection()
+                    # Update current index without changing selection so the
+                    # detail pane stays aligned with the clicked row.
+                    sel = self.selectionModel()
+                    if sel is not None:
+                        sel.setCurrentIndex(idx, QItemSelectionModel.SelectionFlag.NoUpdate)
+                    event.accept()
+                    # Swallow to prevent Qt from clearing selection.
+                    return True
+                self._preserve_selection = False
+            return super().eventFilter(watched, event)
+
+        # Right mouse release: if we preserved selection, swallow to avoid Qt
+        # performing any late selection changes on release.
+        if et == QEvent.Type.MouseButtonRelease:
+            if event.button() == Qt.MouseButton.RightButton and self._preserve_selection:
+                event.accept()
+                return True
+            return super().eventFilter(watched, event)
+
+        # Context menu event: if this right-click was on a selected row, restore
+        # selection and emit the custom context menu request ourselves (single menu).
+        if et == QEvent.Type.ContextMenu:
+            if self._preserve_selection:
+                idx = self.indexAt(event.pos())
+                if idx.isValid():
+                    self._restore_selection()
+                    sel = self.selectionModel()
+                    if sel is not None:
+                        sel.setCurrentIndex(idx, QItemSelectionModel.SelectionFlag.NoUpdate)
+                # Emit in viewport coordinates.
+                self.customContextMenuRequested.emit(event.pos())
+                self._preserve_selection = False
+                event.accept()
+                return True
+            return super().eventFilter(watched, event)
+
+        return super().eventFilter(watched, event)
+
 
 
 @dataclass
@@ -73,11 +188,13 @@ class _AssetFilterProxy(QSortFilterProxyModel):
         needle = self._needle
         if not needle:
             return True
-        # Columns: 0 name, 1 type, 2 latest, 3 versions, 4 files, 5 health, 6 key (hidden)
+
+        # Columns: 0 name, 1 type, 2 tags, 3 latest, 4 versions, 5 files, 6 health, 7 key (hidden)
         name = str(model.index(source_row, 0).data() or "").lower()
         typ = str(model.index(source_row, 1).data() or "").lower()
-        key = str(model.index(source_row, 6).data() or "").lower() if model.columnCount() > 6 else ""
-        return needle in name or needle in typ or (key and needle in key)
+        tags = str(model.index(source_row, 2).data() or "").lower() if model.columnCount() > 2 else ""
+        key = str(model.index(source_row, 7).data() or "").lower() if model.columnCount() > 7 else ""
+        return needle in name or needle in typ or (tags and needle in tags) or (key and needle in key)
 
 
 class AssetsLibraryWidget(QWidget):
@@ -104,6 +221,7 @@ class AssetsLibraryWidget(QWidget):
             [
                 "Name",
                 "Type",
+                "Tags",
                 "Latest Version",
                 "Versions",
                 "Files",
@@ -149,7 +267,7 @@ class AssetsLibraryWidget(QWidget):
     def set_show_hidden_columns(self, show: bool) -> None:
         self._show_hidden_columns = bool(show)
         # Hidden columns start at "Key".
-        for col in range(6, self._asset_model.columnCount()):
+        for col in range(7, self._asset_model.columnCount()):
             self._assets_view.setColumnHidden(col, not self._show_hidden_columns)
 
     def set_pending_restore(self, *, asset_id: Optional[int], version_id: Optional[int]) -> None:
@@ -167,13 +285,23 @@ class AssetsLibraryWidget(QWidget):
         self._pending_restore = _Selected()
 
         rows = list_assets(self.context.db_connection, storage_id=self._storage_id)
+        asset_ids = [int(r.asset_id) for r in rows]
+        tag_map: Dict[int, List[Tag]] = {}
+        try:
+            tag_map = list_tags_for_asset_ids(self.context.db_connection, asset_ids)
+        except Exception:
+            tag_map = {}
 
         self._asset_model.removeRows(0, self._asset_model.rowCount())
         for r in rows:
             health = "OK" if int(r.missing_count) == 0 else f"{int(r.missing_count)} MISSING"
+            tags = tag_map.get(int(r.asset_id), [])
+            tag_pairs = [(str(t.name), str(t.color)) for t in tags]
+            tag_text = ", ".join([p[0] for p in tag_pairs])
             items = [
                 QStandardItem(r.name),
                 QStandardItem(r.type),
+                QStandardItem(tag_text),
                 QStandardItem(r.latest_version_label or ""),
                 QStandardItem(str(r.version_count)),
                 QStandardItem(str(r.file_count)),
@@ -188,6 +316,8 @@ class AssetsLibraryWidget(QWidget):
             items[0].setData(int(r.asset_id), Qt.ItemDataRole.UserRole)
             items[0].setData(int(r.storage_id), Qt.ItemDataRole.UserRole + 1)
             items[0].setData(int(r.missing_count), Qt.ItemDataRole.UserRole + 2)
+            # store tag payload on the tags cell for the delegate
+            items[2].setData(tag_pairs, TAG_PAYLOAD_ROLE)
             self._asset_model.appendRow(items)
 
         # Re-apply hidden column state (model refresh can reset header/view state on some Qt builds).
@@ -224,14 +354,16 @@ class AssetsLibraryWidget(QWidget):
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
 
-        self._assets_view = QTableView(left)
+        self._assets_view = _NoCollapseOnRightClickTableView(left)
         self._assets_view.setModel(self._asset_proxy)
         self._assets_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._assets_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._assets_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._assets_view.setSortingEnabled(True)
         self._assets_view.horizontalHeader().setStretchLastSection(True)
         self._assets_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._assets_view.customContextMenuRequested.connect(self._on_assets_context_menu)
+        # Tag chips delegate on the Tags column.
+        self._assets_view.setItemDelegateForColumn(2, TagChipsDelegate(self._assets_view))
         left_layout.addWidget(self._assets_view)
 
         # Default: hide internal columns in v0.
@@ -314,15 +446,17 @@ class AssetsLibraryWidget(QWidget):
         # Important: user can click any column; ids are stored on column 0.
         sel = self._assets_view.selectionModel()
         idx0 = None
-        if sel is not None:
+
+        # Prefer the current index row for detail (multi-select friendly).
+        cur = self._assets_view.currentIndex()
+        if cur.isValid():
+            idx0 = self._asset_proxy.index(cur.row(), 0)
+
+        # Fallback: first selected row.
+        if (idx0 is None or not idx0.isValid()) and sel is not None:
             rows = sel.selectedRows(0)
             if rows:
                 idx0 = rows[0]
-
-        if idx0 is None:
-            cur = self._assets_view.currentIndex()
-            if cur.isValid():
-                idx0 = self._asset_proxy.index(cur.row(), 0)
 
         if idx0 is None or not idx0.isValid():
             self._set_asset_detail(None, None)
@@ -406,8 +540,23 @@ class AssetsLibraryWidget(QWidget):
         idx0 = self._asset_proxy.index(idx.row(), 0)
         asset_id = int(idx0.data(Qt.ItemDataRole.UserRole) or 0)
         name = str(self._asset_proxy.index(idx.row(), 0).data() or "")
-        key = str(self._asset_proxy.index(idx.row(), 6).data() or "")
+        key = str(self._asset_proxy.index(idx.row(), 7).data() or "")
         return asset_id, name, key
+
+    def _selected_asset_ids(self) -> List[int]:
+        sel = self._assets_view.selectionModel()
+        if sel is None:
+            return []
+        ids: List[int] = []
+        for idx in sel.selectedRows(0):
+            try:
+                aid = int(idx.data(Qt.ItemDataRole.UserRole) or 0)
+            except Exception:
+                aid = 0
+            if aid > 0:
+                ids.append(aid)
+        # stable order for logs
+        return sorted(set(ids))
 
     def _representative_file_id_for_current_asset(self) -> Optional[int]:
         """Best-effort file_id for asset location actions."""
@@ -434,8 +583,25 @@ class AssetsLibraryWidget(QWidget):
         if not idx.isValid():
             return
 
-        # Ensure current index/row is updated.
-        self._assets_view.setCurrentIndex(idx)
+        # Preserve multi-selection on right-click.
+        sel = self._assets_view.selectionModel()
+        if sel is not None:
+            # Same issue as above: when selecting rows, a right-click on a
+            # different column can look "unselected" if we check the exact
+            # index. Determine selection by row (or by column 0).
+            idx0 = idx.siblingAtColumn(0)
+            row_selected = sel.isRowSelected(idx.row(), idx.parent())
+            if not (row_selected or sel.isSelected(idx0)):
+                # Replace selection with the clicked row.
+                sel.select(
+                    idx0,
+                    QItemSelectionModel.SelectionFlag.ClearAndSelect
+                    | QItemSelectionModel.SelectionFlag.Rows,
+                )
+            # IMPORTANT: do not call view.setCurrentIndex() here; on some Qt builds
+            # that can collapse multi-selection. Update current index through the
+            # selection model without changing selection.
+            sel.setCurrentIndex(idx0, QItemSelectionModel.SelectionFlag.NoUpdate)
 
         asset_id, name, key = self._current_asset_row_data()
         if asset_id <= 0:
@@ -445,6 +611,15 @@ class AssetsLibraryWidget(QWidget):
 
         act_reveal = menu.addAction("Open asset location (reveal in Explorer)")
         act_reveal.triggered.connect(lambda: self._actions.reveal_in_explorer(self._representative_file_id_for_current_asset()))
+
+        menu.addSeparator()
+
+        tags_menu = menu.addMenu("Tags")
+        act_edit_tags = tags_menu.addAction("Edit tags…")
+        act_edit_tags.triggered.connect(self._on_edit_tags)
+        tags_menu.addSeparator()
+        act_manage_tags = tags_menu.addAction("Manage tags…")
+        act_manage_tags.triggered.connect(self._on_manage_tags)
 
         menu.addSeparator()
 
@@ -464,6 +639,107 @@ class AssetsLibraryWidget(QWidget):
         act_dissolve.triggered.connect(lambda: self._dissolve_asset(asset_id))
 
         menu.exec(self._assets_view.viewport().mapToGlobal(pos))
+
+    # -----------------
+    # Tag actions
+    # -----------------
+
+    def _on_manage_tags(self) -> None:
+        dlg = TagManagerDialog(parent=self, context=self.context)
+        dlg.exec()
+        self.refresh()
+
+    def _on_edit_tags(self) -> None:
+        """Edit tags for the current multi-selection (tri-state dialog)."""
+        conn = self.context.db_connection
+        if conn is None:
+            return
+
+        asset_ids = self._selected_asset_ids()
+        if not asset_ids:
+            return
+
+        tags = list_tags(conn)
+        if not tags:
+            # No tags exist yet; open manager.
+            self._on_manage_tags()
+            return
+
+        current = list_tags_for_asset_ids(conn, asset_ids)
+
+        # Compute per-tag membership across the selection.
+        sets = [set(int(t.id) for t in current.get(aid, [])) for aid in asset_ids]
+        all_ids: Set[int] = set.intersection(*sets) if sets else set()
+        any_ids: Set[int] = set.union(*sets) if sets else set()
+
+        initial_states: Dict[int, Qt.CheckState] = {}
+        for t in tags:
+            tid = int(t.id)
+            if tid in all_ids:
+                initial_states[tid] = Qt.CheckState.Checked
+            elif tid in any_ids:
+                initial_states[tid] = Qt.CheckState.PartiallyChecked
+            else:
+                initial_states[tid] = Qt.CheckState.Unchecked
+
+        dlg = TagSelectDialog(
+            parent=self,
+            title="Edit Tags",
+            tags=tags,
+            initial_states=initial_states,
+            allow_tristate=True,
+        )
+        if dlg.exec() != TagSelectDialog.DialogCode.Accepted:
+            return
+
+        add_ids, remove_ids = dlg.changes()
+        if not add_ids and not remove_ids:
+            return
+
+        inserted = 0
+        deleted = 0
+        try:
+            if add_ids:
+                inserted = add_tags_to_assets(conn, asset_ids=asset_ids, tag_ids=add_ids, commit=True)
+            if remove_ids:
+                deleted = remove_tags_from_assets(conn, asset_ids=asset_ids, tag_ids=remove_ids, commit=True)
+        except Exception:
+            return
+
+        # Human-friendly tag names for logging.
+        tag_by_id = {int(t.id): t for t in tags}
+        add_names = [tag_by_id[tid].name for tid in add_ids if tid in tag_by_id]
+        remove_names = [tag_by_id[tid].name for tid in remove_ids if tid in tag_by_id]
+
+        try:
+            parts = []
+            if add_names:
+                parts.append(f"+{add_names}")
+            if remove_names:
+                parts.append(f"-{remove_names}")
+            self.context.log.info(f"Updated tags for {len(asset_ids)} asset(s): " + " ".join(parts))
+        except Exception:
+            pass
+
+        try:
+            self.context.event_hub.db_changed.emit(
+                DbChanged(
+                    reason="asset_tags_edited",
+                    payload={
+                        "asset_ids": asset_ids,
+                        "add_tag_ids": add_ids,
+                        "remove_tag_ids": remove_ids,
+                        "new_links": inserted,
+                        "removed_links": deleted,
+                    },
+                )
+            )
+        except Exception:
+            pass
+
+        self.refresh()
+
+
 
     def _dissolve_asset(self, asset_id: int) -> None:
         aid = int(asset_id)
