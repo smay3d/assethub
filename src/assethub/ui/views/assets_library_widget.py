@@ -688,13 +688,13 @@ class AssetsLibraryWidget(QWidget):
                 "Version number",
                 "Version number (used for vNN sorting):",
                 value=int(getattr(v, "sort_key", 1) or 1),
-                min=0,
-                max=999999,
+                minValue=1,
+                maxValue=999999,
             )
             if not ok:
                 return
             try:
-                set_version_sort_key(conn, version_id=int(vid), new_sort_key=int(val))
+                set_version_sort_key(conn, version_id=int(vid), sort_key=int(val))
             except Exception as e:
                 QMessageBox.warning(self, "AssetHub", f"Failed to update version number: {e}")
                 return

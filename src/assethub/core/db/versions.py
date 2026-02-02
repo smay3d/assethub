@@ -27,23 +27,33 @@ def set_version_user_label(
         raise ValueError("version not found")
 
     ulbl = str(user_label or "").strip()
-    conn.execute("UPDATE version SET user_label=? WHERE id=?;", (ulbl, vid))
+
+    # IMPORTANT: keep DB writes + audit log in a single transaction.
+    # If we insert into version_change_log without committing, the app can
+    # leave an open write transaction and the next scan/health run will hit
+    # "database is locked" until restart.
     if commit:
-        conn.commit()
+        with conn:
+            conn.execute("UPDATE version SET user_label=? WHERE id=?;", (ulbl, vid))
+            try:
+                from assethub.core.db.version_membership import write_version_change_log
 
-    # Best-effort audit log.
-    try:
-        from assethub.core.db.version_membership import write_version_change_log
-
-        write_version_change_log(
-            conn,
-            version_id=vid,
-            action_type="version_set_user_label",
-            summary=f"Set version user label: '{v.label}' → '{ulbl}'" if ulbl else f"Cleared version user label: '{v.label}'",
-            payload={"user_label": ulbl},
-        )
-    except Exception:
-        pass
+                write_version_change_log(
+                    conn,
+                    version_id=vid,
+                    action_type="version_set_user_label",
+                    summary=(
+                        f"Set version user label: '{v.label}' → '{ulbl}'"
+                        if ulbl
+                        else f"Cleared version user label: '{v.label}'"
+                    ),
+                    payload={"user_label": ulbl},
+                )
+            except Exception:
+                # Logging must never block the core operation.
+                pass
+    else:
+        conn.execute("UPDATE version SET user_label=? WHERE id=?;", (ulbl, vid))
 
 
 def set_version_discarded(
@@ -61,24 +71,28 @@ def set_version_discarded(
         raise ValueError("version not found")
 
     flag = 1 if bool(is_discarded) else 0
-    conn.execute("UPDATE version SET is_discarded=? WHERE id=?;", (flag, vid))
+
     if commit:
-        conn.commit()
+        with conn:
+            conn.execute("UPDATE version SET is_discarded=? WHERE id=?;", (flag, vid))
+            try:
+                from assethub.core.db.version_membership import write_version_change_log
 
-    try:
-        from assethub.core.db.version_membership import write_version_change_log
-
-        write_version_change_log(
-            conn,
-            version_id=vid,
-            action_type="version_set_discarded",
-            summary=(
-                f"Marked version discarded: {v.label}" if flag else f"Restored version: {v.label}"
-            ),
-            payload={"is_discarded": flag},
-        )
-    except Exception:
-        pass
+                write_version_change_log(
+                    conn,
+                    version_id=vid,
+                    action_type="version_set_discarded",
+                    summary=(
+                        f"Marked version discarded: {v.label}"
+                        if flag
+                        else f"Restored version: {v.label}"
+                    ),
+                    payload={"is_discarded": flag},
+                )
+            except Exception:
+                pass
+    else:
+        conn.execute("UPDATE version SET is_discarded=? WHERE id=?;", (flag, vid))
 
 
 def set_version_sort_key(
@@ -110,25 +124,29 @@ def set_version_sort_key(
     if str(v.scheme).strip() == "vNN":
         new_label = _label_for_scheme(new_sk, v.scheme)
 
-    conn.execute(
-        "UPDATE version SET sort_key=?, label=? WHERE id=?;",
-        (new_sk, str(new_label), vid),
-    )
     if commit:
-        conn.commit()
+        with conn:
+            conn.execute(
+                "UPDATE version SET sort_key=?, label=? WHERE id=?;",
+                (new_sk, str(new_label), vid),
+            )
+            try:
+                from assethub.core.db.version_membership import write_version_change_log
 
-    try:
-        from assethub.core.db.version_membership import write_version_change_log
-
-        write_version_change_log(
-            conn,
-            version_id=vid,
-            action_type="version_set_sort_key",
-            summary=f"Changed version number: {v.label} ({v.sort_key}) → {new_label} ({new_sk})",
-            payload={"old_sort_key": int(v.sort_key), "new_sort_key": int(new_sk)},
+                write_version_change_log(
+                    conn,
+                    version_id=vid,
+                    action_type="version_set_sort_key",
+                    summary=f"Changed version number: {v.label} ({v.sort_key}) → {new_label} ({new_sk})",
+                    payload={"old_sort_key": int(v.sort_key), "new_sort_key": int(new_sk)},
+                )
+            except Exception:
+                pass
+    else:
+        conn.execute(
+            "UPDATE version SET sort_key=?, label=? WHERE id=?;",
+            (new_sk, str(new_label), vid),
         )
-    except Exception:
-        pass
 
 
 def _label_for_scheme(sort_key: int, scheme: str) -> str:

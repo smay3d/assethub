@@ -269,18 +269,50 @@ class ScanTab(QWidget):
 
         in_use = sm.count_files_for_storage(storage_id)
         if in_use > 0:
-            QMessageBox.warning(
-                self,
-                "AssetHub",
-                "Cannot remove this root because it is referenced by tracked files. "
-                "Remove associated file records first, then try again.",
+            # Stage 9.2.1: streamline power-user workflow.
+            # Allow unregistering a root by also removing its tracked file records.
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setWindowTitle("Remove Storage Root")
+            msg.setText(
+                "This storage root is referenced by tracked file records.\n\n"
+                "You can remove the root *and* remove its tracked file records from the database. "
+                "This does not delete files on disk."
             )
+            msg.setInformativeText(
+                f"Root: {root.display_label}\nPath: {root.root_path}\nTracked file records: {int(in_use)}"
+            )
+            btn_remove = msg.addButton("Remove root and tracked records", QMessageBox.ButtonRole.AcceptRole)
+            msg.addButton(QMessageBox.StandardButton.Cancel)
+            msg.exec()
+            if msg.clickedButton() is not btn_remove:
+                try:
+                    self.context.log.info(f"Remove root canceled: storage_id={int(storage_id)}")
+                except Exception:
+                    pass
+                return
+
             try:
-                self.context.log.warn(
-                    f"Remove root blocked: referenced by tracked files (storage_id={int(storage_id)}, file_count={int(in_use)})"
+                removed = sm.remove_root_from_tracking(storage_id)
+                try:
+                    self.context.log.info(
+                        f"Removed storage root and associated file records: {root.display_label} ({root.root_path})"
+                    )
+                except Exception:
+                    pass
+                self.refresh_roots()
+                self.context.event_hub.db_changed.emit(
+                    DbChanged(
+                        reason="storage_root_removed_with_records",
+                        payload={"storage_id": int(storage_id), "removed_file_records": int(removed)},
+                    )
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                QMessageBox.warning(self, "AssetHub", f"Remove failed: {e}")
+                try:
+                    self.context.log.error(f"Remove root failed: {e}")
+                except Exception:
+                    pass
             return
 
         confirm = QMessageBox.question(

@@ -9,6 +9,7 @@ import re
 import sqlite3
 
 from .rules_loader import DetectionRuleset
+from .version_parse import strip_version_token
 
 
 @dataclass(frozen=True)
@@ -59,7 +60,13 @@ def _compile_image_seq_regex(seps: Tuple[str, ...], min_digits: int) -> re.Patte
 def _compile_texture_regex(seps: Tuple[str, ...], tokens: Tuple[str, ...]) -> re.Pattern[str]:
     esc = "".join(re.escape(s) for s in seps)
     toks = "|".join(re.escape(t) for t in tokens)
-    return re.compile(rf"^(?P<base>.+)(?P<sep>[{esc}])(?P<chan>{toks})(?P<ext>\.[^./\\]+)$", re.IGNORECASE)
+    # Allow an optional trailing version token after the channel, e.g.
+    #   foo_albedo_v02.exr
+    # This keeps grouping robust for common CG naming patterns.
+    return re.compile(
+        rf"^(?P<base>.+)(?P<sep>[{esc}])(?P<chan>{toks})(?P<ver>(?:[{esc}](?:v|ver|version)\s*0*\d+))?(?P<ext>\.[^./\\]+)$",
+        re.IGNORECASE,
+    )
 
 
 def detect_proposals_for_storage(
@@ -122,7 +129,7 @@ def detect_proposals_for_storage(
         # texture_set
         m2 = tex_re.match(name)
         if m2:
-            base = str(m2.group("base"))
+            base = strip_version_token(str(m2.group("base")))
             key = f"{d}/{base}" if d else base
             tex_groups.setdefault(key, []).append(int(file_id))
             used_file_ids.add(int(file_id))
@@ -130,7 +137,8 @@ def detect_proposals_for_storage(
 
         # generic (fallback)
         stem = re.sub(r"\.[^./\\]+$", "", name)
-        key = f"{d}/{stem}" if d else stem
+        stem_clean = strip_version_token(stem)
+        key = f"{d}/{stem_clean}" if d else stem_clean
         generic_groups.setdefault(key, []).append(int(file_id))
         used_file_ids.add(int(file_id))
 
@@ -161,7 +169,8 @@ def detect_proposals_for_storage(
                 rel = _norm_rel(rel_raw)
                 d, name = _split_dir_name(rel)
                 stem = re.sub(r"\.[^./\\]+$", "", name)
-                gkey = f"{d}/{stem}" if d else stem
+                stem_clean = strip_version_token(stem)
+                gkey = f"{d}/{stem_clean}" if d else stem_clean
                 generic_groups.setdefault(gkey, []).append(fid)
             continue
         base = key.split("/")[-1]

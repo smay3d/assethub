@@ -21,4 +21,7 @@ def get_connection(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     # Default safety/consistency settings.
     conn.execute("PRAGMA foreign_keys = ON;")
+    # Reduce transient lock errors when a long-lived UI connection exists.
+    # (Does not hide real deadlocks; it just waits briefly for locks to clear.)
+    conn.execute("PRAGMA busy_timeout = 5000;")
     return conn

@@ -71,3 +71,34 @@ def format_vnn(n: int) -> str:
     if nn <= 0:
         raise ValueError("n must be positive")
     return f"v{nn:02d}"
+
+
+def strip_version_token(stem_or_name: str) -> str:
+    """Strip a trailing version token from a stem/name.
+
+    Examples:
+        foo_v02 -> foo
+        foo.ver2 -> foo
+        foo-version_12 -> foo
+
+    Notes:
+        - Operates on the *stem* (no extension) but is tolerant of full names.
+        - Removes only the *last* matching token to avoid being too destructive.
+    """
+
+    s = str(stem_or_name or "").strip()
+    if not s:
+        return ""
+
+    base = os.path.basename(s)
+    stem, ext = os.path.splitext(base)
+    # If the caller passed a stem, ext will be empty. That's fine.
+
+    matches = list(_RE.finditer(stem))
+    if not matches:
+        return stem
+
+    m = matches[-1]
+    start, end = m.span()
+    out = (stem[:start] + stem[end:]).rstrip("._- ")
+    return out
