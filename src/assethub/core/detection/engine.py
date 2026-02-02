@@ -93,6 +93,17 @@ def detect_proposals_for_storage(
     img_re = _compile_image_seq_regex(rules.image_sequence_separators, rules.image_sequence_min_digits)
     tex_re = _compile_texture_regex(rules.texture_set_separators, rules.texture_set_channel_tokens)
 
+    # Existing texture_set assets allow "partial" proposals (e.g., a single updated channel
+    # file) to be treated as updates instead of being demoted to generic. This enables a
+    # power-user workflow where new versions can be created from incremental updates.
+    existing_tex_keys: set[str] = set(
+        str(r[0])
+        for r in conn.execute(
+            "SELECT key FROM asset WHERE storage_id=? AND type='texture_set';",
+            (sid,),
+        ).fetchall()
+    )
+
     used_file_ids: set[int] = set()
 
     img_groups: Dict[str, Dict[str, object]] = {}
@@ -161,8 +172,9 @@ def detect_proposals_for_storage(
 
     # Emit texture sets (only groups >= min_files)
     for key, file_ids in tex_groups.items():
-        if len(file_ids) < rules.texture_set_min_files:
-            # If it doesn't qualify, move its members into generic groups deterministically.
+        if len(file_ids) < rules.texture_set_min_files and key not in existing_tex_keys:
+            # If it doesn't qualify *and* does not match an existing texture_set asset,
+            # demote its members into generic groups deterministically.
             for fid in file_ids:
                 # reconstruct generic key from the file row
                 rel_raw = next(r[1] for r in rows if int(r[0]) == fid)
@@ -180,7 +192,11 @@ def detect_proposals_for_storage(
                 key=key,
                 suggested_name=base,
                 file_ids=sorted(file_ids),
-                reason="texture_set: channel tokens",
+                reason=(
+                    "texture_set: channel tokens"
+                    if len(file_ids) >= rules.texture_set_min_files
+                    else "texture_set: partial update (existing asset)"
+                ),
             )
         )
 

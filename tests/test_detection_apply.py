@@ -131,3 +131,83 @@ def test_apply_skips_owned_and_rolls_back_on_missing(tmp_path) -> None:
     assert int(conn2.execute("SELECT COUNT(*) FROM version;").fetchone()[0]) == 0
     assert int(conn2.execute("SELECT COUNT(*) FROM version_change_log;").fetchone()[0]) == 0
     assert conn2.execute("SELECT version_id FROM file WHERE id=?;", (f_ok,)).fetchone()[0] is None
+
+
+def test_apply_version_up_merge_carries_forward_and_replaces_role(tmp_path) -> None:
+    """Stage 9.2 Ext: version-up merge when a newer-version file is detected.
+
+    We approximate "carry forward" by moving prior version membership to the new
+    version *except* files whose basename role matches an incoming file (those are
+    kept in the source version as history).
+    """
+
+    conn = sqlite3.connect(tmp_path / "assethub_test.sqlite3")
+    initialize_schema(conn)
+
+    sid = _insert_storage(conn, name="RootA", root_path="/tmp/root_a")
+
+    # Existing texture_set asset with version v04 and 5 members.
+    a0 = create_asset(conn, storage_id=sid, type="texture_set", key="tex/Forest", name="Forest", commit=False)
+    v4 = create_version(conn, asset_id=int(a0.id), sort_key_override=4, commit=False)
+
+    f_alb = _insert_file(conn, storage_id=sid, rel="tex/Forest_albedo_v02.tif")
+    f_ao = _insert_file(conn, storage_id=sid, rel="tex/Forest_ao_v02.tif")
+    f_h = _insert_file(conn, storage_id=sid, rel="tex/Forest_height_v03.tif")
+    f_r = _insert_file(conn, storage_id=sid, rel="tex/Forest_roughness_v02.tif")
+    f_n4 = _insert_file(conn, storage_id=sid, rel="tex/Forest_normal_v04.tif")
+    attach_files_to_version(conn, version_id=int(v4.id), file_ids=[f_alb, f_ao, f_h, f_r, f_n4])
+
+    # New incoming normal map; unowned.
+    f_n5 = _insert_file(conn, storage_id=sid, rel="tex/Forest_normal_v05.tif")
+    conn.commit()
+
+    res = apply_detection_proposals(
+        conn,
+        storage_id=sid,
+        items=[
+            ApplyItem(
+                type="texture_set",
+                key="tex/Forest",
+                name="Forest",
+                file_ids=[f_n5],
+                desired_sort_key=5,
+            )
+        ],
+    )
+
+    assert res.created_assets == 0
+    assert res.created_versions == 1
+    assert res.attached_files == 1
+
+    # v05 exists and includes all prior members except the replaced normal_v04.
+    v5_id = conn.execute(
+        "SELECT id FROM version WHERE asset_id=? AND sort_key=5;", (int(a0.id),)
+    ).fetchone()[0]
+    ids_v5 = {
+        int(r[0])
+        for r in conn.execute(
+            "SELECT id FROM file WHERE version_id=? ORDER BY id ASC;", (int(v5_id),)
+        ).fetchall()
+    }
+    assert f_n5 in ids_v5
+    assert f_alb in ids_v5
+    assert f_ao in ids_v5
+    assert f_h in ids_v5
+    assert f_r in ids_v5
+    assert f_n4 not in ids_v5
+
+    # Source version keeps the replaced normal_v04 for history.
+    ids_v4 = {
+        int(r[0])
+        for r in conn.execute(
+            "SELECT id FROM file WHERE version_id=? ORDER BY id ASC;", (int(v4.id),)
+        ).fetchall()
+    }
+    assert ids_v4 == {f_n4}
+
+    # A log entry is recorded on the new version.
+    row = conn.execute(
+        "SELECT action_type FROM version_change_log WHERE version_id=? ORDER BY id DESC LIMIT 1;",
+        (int(v5_id),),
+    ).fetchone()
+    assert row is not None and row[0] in ("version_up_merge", "detect_apply")

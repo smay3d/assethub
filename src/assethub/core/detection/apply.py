@@ -21,7 +21,36 @@ from typing import Any, Dict, List, Sequence, Optional, Tuple
 from assethub.core.db.assets import create_asset
 from assethub.core.db.versions import create_version, get_version_by_asset_sort_key
 from assethub.core.db.version_membership import attach_files_to_version, write_version_change_log
-from assethub.core.detection.version_parse import parse_version_num
+from assethub.core.detection.version_parse import parse_version_num, strip_version_token
+
+
+def _latest_active_version(conn: sqlite3.Connection, *, asset_id: int) -> Optional[Tuple[int, int]]:
+    """Return (version_id, sort_key) for the latest non-discarded version, if any."""
+    row = conn.execute(
+        """
+        SELECT id, sort_key
+        FROM version
+        WHERE asset_id=? AND is_discarded=0
+        ORDER BY sort_key DESC
+        LIMIT 1;
+        """,
+        (int(asset_id),),
+    ).fetchone()
+    if row is None:
+        return None
+    return int(row[0]), int(row[1])
+
+
+def _role_key_from_relpath(rel: str) -> str:
+    """A deterministic 'role key' for replacement comparisons.
+
+    For version-up merges we want to carry forward prior version files except those
+    that are being replaced by newly detected files. A practical heuristic is to
+    compare basenames with the version token removed.
+    """
+    base = os.path.basename(str(rel or ""))
+    stem = os.path.splitext(base)[0]
+    return strip_version_token(stem)
 
 
 @dataclass(frozen=True)
@@ -237,28 +266,176 @@ def apply_detection_proposals(
             )
 
             ident = (int(asset.storage_id), str(asset.type), str(asset.key))
-            if ident not in existing_asset_keys:
+            existed_before = ident in existing_asset_keys
+            if not existed_before:
                 created_assets += 1
                 existing_asset_keys.add(ident)
 
             desired = item.desired_sort_key
-            if desired is not None:
-                existing = get_version_by_asset_sort_key(
-                    conn, asset_id=int(asset.id), sort_key=int(desired)
-                )
+            version = None
+
+            # Stage 9.2 Ext: version-up merge into existing assets.
+            # If an asset already exists and the incoming files specify a newer version
+            # number, create that version and carry forward the previous membership.
+            if desired is not None and existed_before:
+                # If the desired version already exists, just attach into it.
+                existing = get_version_by_asset_sort_key(conn, asset_id=int(asset.id), sort_key=int(desired))
                 if existing is not None:
                     version = existing
                 else:
-                    version = create_version(
-                        conn,
-                        asset_id=int(asset.id),
-                        sort_key_override=int(desired),
-                        commit=False,
-                    )
+                    # Determine the latest non-discarded version to carry forward from.
+                    row = conn.execute(
+                        """
+                        SELECT id, sort_key
+                        FROM version
+                        WHERE asset_id=? AND is_discarded=0
+                        ORDER BY sort_key DESC
+                        LIMIT 1;
+                        """,
+                        (int(asset.id),),
+                    ).fetchone()
+                    src_vid = int(row[0]) if row is not None else 0
+                    src_sort = int(row[1]) if row is not None else 0
+
+                    if src_vid > 0 and int(desired) > int(src_sort):
+                        # Create the new version explicitly at the desired sort_key.
+                        version = create_version(
+                            conn,
+                            asset_id=int(asset.id),
+                            sort_key_override=int(desired),
+                            commit=False,
+                        )
+                        created_versions += 1
+
+                        # Build replacement "roles" for incoming files so we can keep
+                        # replaced files in the source version (history), while migrating
+                        # unchanged members forward.
+                        ph_in = ",".join(["?"] * len(fids))
+                        in_rows = conn.execute(
+                            f"SELECT id, relative_path FROM file WHERE id IN ({ph_in});",
+                            tuple(fids),
+                        ).fetchall()
+                        replace_roles: set[str] = set()
+                        for _fid, _rel in in_rows:
+                            base = os.path.basename(str(_rel or ""))
+                            stem = os.path.splitext(base)[0]
+                            replace_roles.add(strip_version_token(stem))
+
+                        src_rows = conn.execute(
+                            """
+                            SELECT id, relative_path, integrity_state
+                            FROM file
+                            WHERE version_id=?
+                            ORDER BY id ASC;
+                            """,
+                            (int(src_vid),),
+                        ).fetchall()
+
+                        move_ids: List[int] = []
+                        for fid0, rel0, integrity0 in src_rows:
+                            if str(integrity0 or "") == "MISSING":
+                                continue
+                            base0 = os.path.basename(str(rel0 or ""))
+                            stem0 = os.path.splitext(base0)[0]
+                            role0 = strip_version_token(stem0)
+                            if role0 in replace_roles:
+                                continue
+                            move_ids.append(int(fid0))
+
+                        if move_ids:
+                            ph = ",".join(["?"] * len(move_ids))
+                            conn.execute(
+                                f"UPDATE file SET version_id=?, updated_at=CURRENT_TIMESTAMP WHERE id IN ({ph});",
+                                (int(version.id), *move_ids),
+                            )
+
+                        # Touch both source + new versions so UI refreshes show updated timestamps.
+                        conn.execute(
+                            "UPDATE version SET updated_at=CURRENT_TIMESTAMP WHERE id IN (?, ?);",
+                            (int(src_vid), int(version.id)),
+                        )
+
+                        payload_extra: Dict[str, Any] = {
+                            "source_version_id": int(src_vid),
+                            "carried_forward_file_ids": move_ids,
+                            "kept_in_source_roles": sorted(replace_roles),
+                        }
+
+                        attach = attach_files_to_version(
+                            conn,
+                            version_id=int(version.id),
+                            file_ids=fids,
+                            enforce_unowned=True,
+                            use_transaction=False,
+                            write_log=False,
+                            payload_extra=payload_extra,
+                        )
+
+                        if attach.missing_file_rows:
+                            skipped_missing += int(attach.missing_file_rows)
+                            raise ValueError(
+                                f"Detection apply failed: {attach.missing_file_rows} file row(s) were missing for version_id={int(version.id)}"
+                            )
+
+                        attached_files += int(attach.attached)
+                        skipped_owned += int(attach.skipped_owned)
+
+                        payload: Dict[str, Any] = {
+                            "source": "detection",
+                            "storage_id": sid,
+                            "asset_id": int(asset.id),
+                            "asset_type": t,
+                            "asset_key": k,
+                            "asset_name": n,
+                            "version_id": int(version.id),
+                            "source_version_id": int(src_vid),
+                            "carried_forward_file_ids": move_ids,
+                            "added_file_ids": _norm_ids(fids) if attach.attached else [],
+                            "skipped_owned": int(attach.skipped_owned),
+                        }
+
+                        # Record only the actually attached file ids (subset of the proposal fids).
+                        rows2 = conn.execute(
+                            f"SELECT id FROM file WHERE id IN ({ph_in}) AND version_id=? ORDER BY id ASC;",
+                            (*tuple(fids), int(version.id)),
+                        ).fetchall()
+                        payload["added_file_ids"] = [int(r[0]) for r in rows2]
+
+                        summary = (
+                            f"Detect apply: asset '{n}' ({t}) → {version.label}; "
+                            f"carried {len(move_ids)} files; attached {int(attach.attached)} files"
+                        )
+                        if attach.skipped_owned:
+                            summary += f" (skipped {int(attach.skipped_owned)} owned)"
+
+                        write_version_change_log(
+                            conn,
+                            version_id=int(version.id),
+                            action_type="version_up_merge",
+                            summary=summary,
+                            payload=payload,
+                        )
+
+                        summaries.append(summary)
+                        continue
+
+            # Default path: create/find the desired version or auto-increment.
+            if version is None:
+                if desired is not None:
+                    existing = get_version_by_asset_sort_key(conn, asset_id=int(asset.id), sort_key=int(desired))
+                    if existing is not None:
+                        version = existing
+                    else:
+                        version = create_version(
+                            conn,
+                            asset_id=int(asset.id),
+                            sort_key_override=int(desired),
+                            commit=False,
+                        )
+                        created_versions += 1
+                else:
+                    version = create_version(conn, asset_id=int(asset.id), commit=False)
                     created_versions += 1
-            else:
-                version = create_version(conn, asset_id=int(asset.id), commit=False)
-                created_versions += 1
 
             attach = attach_files_to_version(
                 conn,
