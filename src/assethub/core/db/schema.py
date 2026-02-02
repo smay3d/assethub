@@ -24,7 +24,7 @@ import sqlite3
 from typing import Callable, Dict
 
 
-LATEST_SCHEMA_VERSION = 5
+LATEST_SCHEMA_VERSION = 6
 
 
 def get_schema_version(conn: sqlite3.Connection) -> int:
@@ -121,6 +121,16 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
         FOREIGN KEY(storage_id) REFERENCES storage(id) ON DELETE RESTRICT
     );
 
+    -- Schema v6: version membership join table (allows files to belong to multiple versions)
+    CREATE TABLE IF NOT EXISTS version_file (
+        version_id  INTEGER NOT NULL,
+        file_id     INTEGER NOT NULL,
+        added_at    TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+        PRIMARY KEY (version_id, file_id),
+        FOREIGN KEY(version_id) REFERENCES version(id) ON DELETE CASCADE,
+        FOREIGN KEY(file_id) REFERENCES file(id) ON DELETE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS tag (
         id      INTEGER PRIMARY KEY,
         name    TEXT NOT NULL UNIQUE,
@@ -137,6 +147,8 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
 
     CREATE INDEX IF NOT EXISTS idx_file_storage_id ON file(storage_id);
     CREATE INDEX IF NOT EXISTS idx_file_version_id ON file(version_id);
+    CREATE INDEX IF NOT EXISTS idx_version_file_version_id ON version_file(version_id);
+    CREATE INDEX IF NOT EXISTS idx_version_file_file_id ON version_file(file_id);
     CREATE INDEX IF NOT EXISTS idx_log_version_id ON version_change_log(version_id);
     """
 
@@ -284,6 +296,48 @@ def _migrate_to_v5(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE version ADD COLUMN user_label TEXT NOT NULL DEFAULT '';")
 
     _record_schema_version(conn, 5)
+
+
+def _migrate_to_v6(conn: sqlite3.Connection) -> None:
+    """Migrate to schema v6.
+
+    v6 introduces a multi-membership join table for versions:
+      - version_file(version_id, file_id)
+
+    This allows a file to belong to multiple versions (true snapshots).
+
+    Migration is forward-only and idempotent.
+    """
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS version_file (
+            version_id  INTEGER NOT NULL,
+            file_id     INTEGER NOT NULL,
+            added_at    TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+            PRIMARY KEY (version_id, file_id),
+            FOREIGN KEY(version_id) REFERENCES version(id) ON DELETE CASCADE,
+            FOREIGN KEY(file_id) REFERENCES file(id) ON DELETE CASCADE
+        );
+        """
+    )
+
+    # Backfill membership from legacy single-owner column file.version_id.
+    # Use OR IGNORE to keep the migration idempotent.
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO version_file(version_id, file_id)
+        SELECT f.version_id, f.id
+        FROM file f
+        WHERE f.version_id IS NOT NULL;
+        """
+    )
+
+    # Helpful indexes (safe to call repeatedly).
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_version_file_version_id ON version_file(version_id);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_version_file_file_id ON version_file(file_id);")
+
+    _record_schema_version(conn, 6)
 
 
 def _ensure_unmanaged_storage_row(conn: sqlite3.Connection) -> int:
@@ -501,4 +555,5 @@ _MIGRATIONS: Dict[int, Callable[[sqlite3.Connection], None]] = {
     3: _migrate_to_v3,
     4: _migrate_to_v4,
     5: _migrate_to_v5,
+    6: _migrate_to_v6,
 }

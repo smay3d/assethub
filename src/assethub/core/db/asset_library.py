@@ -80,15 +80,16 @@ def list_assets(
                 WHERE v.asset_id=a.id
             ) AS version_count,
             (
-                SELECT COUNT(1)
-                FROM file f
-                JOIN version v2 ON v2.id=f.version_id
+                SELECT COUNT(DISTINCT vf.file_id)
+                FROM version_file vf
+                JOIN version v2 ON v2.id=vf.version_id
                 WHERE v2.asset_id=a.id
             ) AS file_count,
             (
-                SELECT COUNT(1)
-                FROM file f
-                JOIN version v2 ON v2.id=f.version_id
+                SELECT COUNT(DISTINCT vf.file_id)
+                FROM version_file vf
+                JOIN version v2 ON v2.id=vf.version_id
+                JOIN file f ON f.id=vf.file_id
                 WHERE v2.asset_id=a.id
                   AND f.integrity_state='MISSING'
                   AND COALESCE(v2.is_discarded, 0)=0
@@ -143,10 +144,11 @@ def list_files_for_version(conn: sqlite3.Connection, *, version_id: int) -> List
     """
     rows = conn.execute(
         """
-        SELECT id, storage_id, relative_path, integrity_state, size_bytes, mtime_unix
-        FROM file
-        WHERE version_id=?
-        ORDER BY relative_path, id;
+        SELECT f.id, f.storage_id, f.relative_path, f.integrity_state, f.size_bytes, f.mtime_unix
+        FROM version_file vf
+        JOIN file f ON f.id=vf.file_id
+        WHERE vf.version_id=?
+        ORDER BY f.relative_path, f.id;
         """,
         (int(version_id),),
     ).fetchall()

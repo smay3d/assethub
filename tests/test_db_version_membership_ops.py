@@ -34,7 +34,13 @@ def _insert_file(
         "VALUES (?, ?, ?, ?, ?, ?);",
         (int(storage_id), relative_path, version_id, integrity_state, size_bytes, 1000.0),
     )
-    return int(conn.execute("SELECT last_insert_rowid();").fetchone()[0])
+    fid = int(conn.execute("SELECT last_insert_rowid();").fetchone()[0])
+    if version_id is not None:
+        conn.execute(
+            "INSERT OR IGNORE INTO version_file(version_id, file_id) VALUES (?, ?);",
+            (int(version_id), int(fid)),
+        )
+    return fid
 
 
 def test_attach_honors_enforce_unowned(tmp_path) -> None:

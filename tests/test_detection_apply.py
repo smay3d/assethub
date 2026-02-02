@@ -211,3 +211,70 @@ def test_apply_version_up_merge_carries_forward_and_replaces_role(tmp_path) -> N
         (int(v5_id),),
     ).fetchone()
     assert row is not None and row[0] in ("version_up_merge", "detect_apply")
+
+
+
+def test_apply_version_up_merge_sources_latest_per_role(tmp_path) -> None:
+    """Stage 9.2.3: build new composite version from latest file per role.
+
+    If the latest asset version is incomplete (delta history), the merge should still
+    assemble the new version from the latest available files across the asset's active
+    versions, with incoming files overriding their role.
+    """
+
+    conn = sqlite3.connect(tmp_path / "assethub_test.sqlite3")
+    initialize_schema(conn)
+
+    sid = _insert_storage(conn, name="RootA", root_path="/tmp/root_a")
+
+    a0 = create_asset(conn, storage_id=sid, type="texture_set", key="tex/Forest", name="Forest", commit=False)
+
+    # v03 contains most files.
+    v3 = create_version(conn, asset_id=int(a0.id), sort_key_override=3, commit=False)
+    f_alb = _insert_file(conn, storage_id=sid, rel="tex/Forest_albedo_v02.tif")
+    f_ao = _insert_file(conn, storage_id=sid, rel="tex/Forest_ao_v02.tif")
+    f_h = _insert_file(conn, storage_id=sid, rel="tex/Forest_height_v03.tif")
+    f_r = _insert_file(conn, storage_id=sid, rel="tex/Forest_roughness_v02.tif")
+    attach_files_to_version(conn, version_id=int(v3.id), file_ids=[f_alb, f_ao, f_h, f_r])
+
+    # v04 is the latest but contains only normal_v04 (incomplete).
+    v4 = create_version(conn, asset_id=int(a0.id), sort_key_override=4, commit=False)
+    f_n4 = _insert_file(conn, storage_id=sid, rel="tex/Forest_normal_v04.tif")
+    attach_files_to_version(conn, version_id=int(v4.id), file_ids=[f_n4])
+
+    # Incoming updated normal.
+    f_n5 = _insert_file(conn, storage_id=sid, rel="tex/Forest_normal_v05.tif")
+    conn.commit()
+
+    res = apply_detection_proposals(
+        conn,
+        storage_id=sid,
+        items=[
+            ApplyItem(
+                type="texture_set",
+                key="tex/Forest",
+                name="Forest",
+                file_ids=[f_n5],
+                desired_sort_key=5,
+            )
+        ],
+    )
+
+    assert res.created_assets == 0
+    assert res.created_versions == 1
+    assert res.attached_files == 1
+
+    v5_id = conn.execute(
+        "SELECT id FROM version WHERE asset_id=? AND sort_key=5;", (int(a0.id),)
+    ).fetchone()[0]
+
+    ids_v5 = {int(r[0]) for r in conn.execute("SELECT id FROM file WHERE version_id=?;", (int(v5_id),)).fetchall()}
+    assert ids_v5 == {f_alb, f_ao, f_h, f_r, f_n5}
+
+    # Replaced normal stays in v04.
+    ids_v4 = {int(r[0]) for r in conn.execute("SELECT id FROM file WHERE version_id=?;", (int(v4.id),)).fetchall()}
+    assert ids_v4 == {f_n4}
+
+    # v03 becomes empty after migration.
+    ids_v3 = {int(r[0]) for r in conn.execute("SELECT id FROM file WHERE version_id=?;", (int(v3.id),)).fetchall()}
+    assert ids_v3 == set()

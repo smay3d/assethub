@@ -52,18 +52,22 @@ def test_list_assets_for_storage_counts_and_latest_label(tmp_path: Path) -> None
         "INSERT INTO file(id, version_id, storage_id, relative_path, integrity_state) VALUES (1, 10, ?, 'a/one.png', 'OK');",
         (sid,),
     )
+    conn.execute("INSERT OR IGNORE INTO version_file(version_id, file_id) VALUES (10, 1);")
     conn.execute(
         "INSERT INTO file(id, version_id, storage_id, relative_path, integrity_state) VALUES (2, 11, ?, 'a/two.png', 'MISSING');",
         (sid,),
     )
+    conn.execute("INSERT OR IGNORE INTO version_file(version_id, file_id) VALUES (11, 2);")
     conn.execute(
         "INSERT INTO file(id, version_id, storage_id, relative_path, integrity_state) VALUES (3, 11, ?, 'a/three.png', 'OK');",
         (sid,),
     )
+    conn.execute("INSERT OR IGNORE INTO version_file(version_id, file_id) VALUES (11, 3);")
     conn.execute(
         "INSERT INTO file(id, version_id, storage_id, relative_path, integrity_state) VALUES (4, 21, ?, 'b/one.png', 'OK');",
         (sid,),
     )
+    conn.execute("INSERT OR IGNORE INTO version_file(version_id, file_id) VALUES (21, 4);")
     conn.commit()
 
     rows = list_assets_for_storage(conn, sid)
@@ -106,10 +110,12 @@ def test_list_versions_and_files_deterministic(tmp_path: Path) -> None:
         "INSERT INTO file(id, version_id, storage_id, relative_path, integrity_state) VALUES (2, 10, ?, 'z.png', 'OK');",
         (sid,),
     )
+    conn.execute("INSERT OR IGNORE INTO version_file(version_id, file_id) VALUES (10, 2);")
     conn.execute(
         "INSERT INTO file(id, version_id, storage_id, relative_path, integrity_state) VALUES (1, 10, ?, 'a.png', 'OK');",
         (sid,),
     )
+    conn.execute("INSERT OR IGNORE INTO version_file(version_id, file_id) VALUES (10, 1);")
     conn.commit()
 
     vers = list_versions(conn, asset_id=1)

@@ -1,10 +1,12 @@
 """DB helpers for version membership operations.
 
-Stage 8 introduces asset-level versioning where each file row may be assigned to
-at most one version via `file.version_id`.
+Schema v6 introduces `version_file` which allows a file to belong to multiple
+versions (true snapshots). We keep `file.version_id` as a *convenience pointer*
+to a "primary" version for legacy UI views, but **membership truth** is stored
+in `version_file`.
 
 This module provides transactional, Qt-free operations to modify membership and
-record a per-action history entry in `version_change_log`.
+record per-action history entries in `version_change_log`.
 """
 
 from __future__ import annotations
@@ -125,6 +127,91 @@ def _fetch_files(
     return out
 
 
+def _fetch_memberships(conn: sqlite3.Connection, file_ids: Sequence[int]) -> Dict[int, Set[int]]:
+    """Return mapping file_id -> set(version_id) using version_file."""
+    ids = _norm_ids(file_ids)
+    if not ids:
+        return {}
+    rows = conn.execute(
+        f"SELECT file_id, version_id FROM version_file WHERE file_id IN ({_ph(len(ids))});",
+        tuple(ids),
+    ).fetchall()
+    out: Dict[int, Set[int]] = {int(fid): set() for fid in ids}
+    for r in rows:
+        fid = int(r[0])
+        vid = int(r[1])
+        out.setdefault(fid, set()).add(vid)
+    # prune empties for callers that want "no memberships" to be missing
+    return {k: v for k, v in out.items() if v}
+
+
+def get_file_ids_for_version(conn: sqlite3.Connection, version_id: int) -> List[int]:
+    """Return file_ids that are members of a version (via version_file)."""
+    vid = int(version_id)
+    if vid <= 0:
+        raise ValueError("version_id must be positive")
+    rows = conn.execute(
+        "SELECT file_id FROM version_file WHERE version_id=? ORDER BY file_id ASC;",
+        (vid,),
+    ).fetchall()
+    return [int(r[0]) for r in rows]
+
+
+def add_files_to_version(
+    conn: sqlite3.Connection,
+    *,
+    version_id: int,
+    file_ids: Sequence[int],
+    ignore_duplicates: bool = True,
+) -> int:
+    """Add membership rows to version_file. Returns number of attempted inserts."""
+    vid = int(version_id)
+    ids = _norm_ids(file_ids)
+    if vid <= 0:
+        raise ValueError("version_id must be positive")
+    if not ids:
+        return 0
+    sql = "INSERT INTO version_file(version_id, file_id) VALUES (?, ?);"
+    if ignore_duplicates:
+        sql = "INSERT OR IGNORE INTO version_file(version_id, file_id) VALUES (?, ?);"
+    conn.executemany(sql, [(vid, int(fid)) for fid in ids])
+    return len(ids)
+
+
+def remove_files_from_version(conn: sqlite3.Connection, *, version_id: int, file_ids: Sequence[int]) -> int:
+    """Remove membership rows from version_file. Returns number of affected file_ids."""
+    vid = int(version_id)
+    ids = _norm_ids(file_ids)
+    if vid <= 0:
+        raise ValueError("version_id must be positive")
+    if not ids:
+        return 0
+    conn.execute(
+        f"DELETE FROM version_file WHERE version_id=? AND file_id IN ({_ph(len(ids))});",
+        (vid, *ids),
+    )
+    return len(ids)
+
+
+def clone_version_membership(conn: sqlite3.Connection, *, src_version_id: int, dst_version_id: int) -> int:
+    """Clone all membership from src to dst using INSERT OR IGNORE."""
+    src = int(src_version_id)
+    dst = int(dst_version_id)
+    if src <= 0 or dst <= 0:
+        raise ValueError("src_version_id and dst_version_id must be positive")
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO version_file(version_id, file_id)
+        SELECT ?, file_id
+        FROM version_file
+        WHERE version_id=?;
+        """,
+        (dst, src),
+    )
+    # rowcount is not reliable for executescript/insert-select; return best-effort.
+    return 0
+
+
 @dataclass(frozen=True)
 class AttachResult:
     attached: int
@@ -165,26 +252,28 @@ def attach_files_to_version(
     files = _fetch_files(conn, ids)
     missing = len(ids) - len(files)
 
+    memberships = _fetch_memberships(conn, ids)
+
     to_attach: List[int] = []
     skipped_owned = 0
     skipped_already = 0
-    moved_from: List[Dict[str, Any]] = []
     notes: List[str] = []
 
     for fid in ids:
-        row = files.get(fid)
-        if row is None:
+        if fid not in files:
             continue
-        cur_vid, _integrity, _size = row
-        if cur_vid == vid:
+
+        cur_members = memberships.get(int(fid), set())
+        if vid in cur_members:
             skipped_already += 1
             continue
-        if cur_vid is not None and enforce_unowned:
+
+        # Enforce "unowned" means: no membership in *any* version.
+        if enforce_unowned and cur_members:
             skipped_owned += 1
             continue
-        if cur_vid is not None and cur_vid != vid:
-            moved_from.append({"file_id": fid, "from_version_id": int(cur_vid)})
-        to_attach.append(fid)
+
+        to_attach.append(int(fid))
 
     log_id = 0
     summary = ""
@@ -192,13 +281,31 @@ def attach_files_to_version(
     def _apply() -> None:
         nonlocal log_id, summary
         if to_attach:
-            conn.execute(
-                f"UPDATE file SET version_id=?, updated_at=CURRENT_TIMESTAMP WHERE id IN ({_ph(len(to_attach))});",
-                (vid, *to_attach),
+            # Membership truth.
+            conn.executemany(
+                "INSERT OR IGNORE INTO version_file(version_id, file_id) VALUES (?, ?);",
+                [(vid, int(fid)) for fid in to_attach],
             )
+
+            # Convenience pointer: promote file.version_id to this version if it's NULL
+            # or points to an older sort_key.
+            row_sk = conn.execute("SELECT sort_key FROM version WHERE id=? LIMIT 1;", (vid,)).fetchone()
+            target_sk = int(row_sk[0]) if row_sk else 0
+            if target_sk > 0:
+                conn.execute(
+                    f"""
+                    UPDATE file
+                    SET version_id=?, updated_at=CURRENT_TIMESTAMP
+                    WHERE id IN ({_ph(len(to_attach))})
+                      AND (
+                        version_id IS NULL OR
+                        COALESCE((SELECT sort_key FROM version WHERE id=file.version_id), -1) < ?
+                      );
+                    """,
+                    (vid, *to_attach, int(target_sk)),
+                )
+
             _touch_versions(conn, [vid])
-            if moved_from:
-                _touch_versions(conn, [int(m["from_version_id"]) for m in moved_from])
 
         payload: Dict[str, Any] = {
             "added_file_ids": to_attach,
@@ -206,22 +313,16 @@ def attach_files_to_version(
             "skipped_already_attached": skipped_already,
             "skipped_owned": skipped_owned,
         }
-        if moved_from:
-            payload["moved_from"] = moved_from
-            notes.append("Some files were reassigned from other versions.")
         if notes:
             payload["notes"] = notes
         if payload_extra:
             payload.update(payload_extra)
 
-        moved_n = len(moved_from)
         suffix_bits: List[str] = []
         if skipped_owned:
             suffix_bits.append(f"skipped {skipped_owned} owned")
         if skipped_already:
             suffix_bits.append(f"skipped {skipped_already} already")
-        if moved_n:
-            suffix_bits.append(f"moved {moved_n}")
 
         suffix = ""
         if suffix_bits:
@@ -269,10 +370,15 @@ def detach_files(
     file_ids: Sequence[int],
     only_from_version_id: Optional[int] = None,
 ) -> DetachResult:
-    """Detach files by clearing file.version_id.
+    """Detach files from version membership.
 
-    If only_from_version_id is provided, detach only where the file is currently
-    assigned to that version.
+    Detaches by deleting rows in `version_file`.
+
+    Notes:
+        - If only_from_version_id is provided, we detach only that membership.
+        - Otherwise, we detach from the file's current *primary* version (file.version_id).
+        - file.version_id is updated to a best-effort remaining membership (latest sort_key)
+          or NULL if no memberships remain.
     """
 
     ids = _norm_ids(file_ids)
@@ -286,7 +392,8 @@ def detach_files(
     files = _fetch_files(conn, ids)
     missing = len(ids) - len(files)
 
-    to_detach: List[int] = []
+    # Decide detach targets per file.
+    to_detach_pairs: List[Tuple[int, int]] = []  # (file_id, version_id)
     skipped = 0
     removed_by_version: Dict[int, List[int]] = {}
 
@@ -295,28 +402,64 @@ def detach_files(
         if row is None:
             continue
         cur_vid, _integrity, _size = row
-        if cur_vid is None:
-            skipped += 1
-            continue
-        if only_vid is not None and cur_vid != only_vid:
-            skipped += 1
-            continue
-        to_detach.append(fid)
-        removed_by_version.setdefault(int(cur_vid), []).append(fid)
+        if only_vid is not None:
+            if cur_vid is None or int(cur_vid) != int(only_vid):
+                skipped += 1
+                continue
+            to_detach_pairs.append((int(fid), int(only_vid)))
+            removed_by_version.setdefault(int(only_vid), []).append(int(fid))
+        else:
+            if cur_vid is None:
+                skipped += 1
+                continue
+            to_detach_pairs.append((int(fid), int(cur_vid)))
+            removed_by_version.setdefault(int(cur_vid), []).append(int(fid))
 
     log_ids: List[int] = []
     with conn:
-        if to_detach:
-            conn.execute(
-                f"UPDATE file SET version_id=NULL, updated_at=CURRENT_TIMESTAMP WHERE id IN ({_ph(len(to_detach))});",
-                tuple(to_detach),
+        if to_detach_pairs:
+            # Remove membership rows.
+            conn.executemany(
+                "DELETE FROM version_file WHERE version_id=? AND file_id=?;",
+                [(int(v), int(f)) for f, v in to_detach_pairs],
             )
+
+            # Update convenience pointer for files whose primary points to the removed version.
+            affected_files = sorted({int(f) for f, _v in to_detach_pairs})
+            for fid in affected_files:
+                cur_ptr = conn.execute("SELECT version_id FROM file WHERE id=?;", (int(fid),)).fetchone()
+                cur_ptr_vid = None if not cur_ptr or cur_ptr[0] is None else int(cur_ptr[0])
+                if cur_ptr_vid is None:
+                    continue
+
+                # If we removed the membership that the pointer referenced, choose a replacement.
+                removed_versions_for_file = {int(v) for f, v in to_detach_pairs if int(f) == int(fid)}
+                if cur_ptr_vid not in removed_versions_for_file:
+                    continue
+
+                repl = conn.execute(
+                    """
+                    SELECT v.id
+                    FROM version_file vf
+                    JOIN version v ON v.id=vf.version_id
+                    WHERE vf.file_id=? AND COALESCE(v.is_discarded,0)=0
+                    ORDER BY v.sort_key DESC, v.id DESC
+                    LIMIT 1;
+                    """,
+                    (int(fid),),
+                ).fetchone()
+                new_ptr = None if repl is None else int(repl[0])
+                conn.execute(
+                    "UPDATE file SET version_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?;",
+                    (new_ptr, int(fid)),
+                )
+
             _touch_versions(conn, list(removed_by_version.keys()))
 
         suffix = ""
         if skipped:
             suffix = f" ({skipped} were not attached)"
-        summary = f"Detached {len(to_detach)} files{suffix}"
+        summary = f"Detached {len(to_detach_pairs)} files{suffix}"
 
         # One log row per impacted version.
         for v_id, removed_ids in sorted(removed_by_version.items()):
@@ -336,7 +479,7 @@ def detach_files(
             )
 
     return DetachResult(
-        detached=len(to_detach),
+        detached=len(to_detach_pairs),
         skipped_not_attached=skipped,
         missing_file_rows=missing,
         summary=summary,
@@ -392,37 +535,75 @@ def repair_version_membership(
     elif old_size is None or new_size is None:
         notes.append("size data missing")
 
-    # Enforce unowned for the new file if requested.
-    if enforce_unowned and new_vid is not None and int(new_vid) != vid:
-        raise ValueError("new_file_id is already owned by another version")
+    # Enforce unowned for the new file if requested (no memberships in any version).
+    if enforce_unowned:
+        mem = _fetch_memberships(conn, [new_id]).get(new_id, set())
+        if mem and (vid not in mem):
+            raise ValueError("new_file_id is already owned by another version")
 
     removed_old = False
     added_new = False
-    moved_from: Optional[int] = None
 
     with conn:
-        if old_vid == vid:
-            conn.execute(
-                "UPDATE file SET version_id=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?;",
-                (old_id,),
-            )
+        # Remove the old membership from this version.
+        existed_old = conn.execute(
+            "SELECT 1 FROM version_file WHERE version_id=? AND file_id=? LIMIT 1;",
+            (vid, old_id),
+        ).fetchone()
+        if existed_old is not None:
+            conn.execute("DELETE FROM version_file WHERE version_id=? AND file_id=?;", (vid, old_id))
             removed_old = True
         else:
             notes.append("old file was not attached to target version")
 
-        if new_vid is not None and int(new_vid) != vid:
-            moved_from = int(new_vid)
-
-        if new_vid != vid:
-            conn.execute(
-                "UPDATE file SET version_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?;",
-                (vid, new_id),
-            )
+        # Add the new membership.
+        existed_new = conn.execute(
+            "SELECT 1 FROM version_file WHERE version_id=? AND file_id=? LIMIT 1;",
+            (vid, new_id),
+        ).fetchone()
+        if existed_new is None:
+            conn.execute("INSERT OR IGNORE INTO version_file(version_id, file_id) VALUES (?, ?);", (vid, new_id))
             added_new = True
 
+        # Convenience pointer updates.
+        row_sk = conn.execute("SELECT sort_key FROM version WHERE id=? LIMIT 1;", (vid,)).fetchone()
+        target_sk = int(row_sk[0]) if row_sk else 0
+        if target_sk > 0:
+            conn.execute(
+                """
+                UPDATE file
+                SET version_id=?, updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                  AND (
+                    version_id IS NULL OR
+                    COALESCE((SELECT sort_key FROM version WHERE id=file.version_id), -1) < ?
+                  );
+                """,
+                (vid, new_id, int(target_sk)),
+            )
+
+        # If the old file pointer referenced this version and we removed it, pick a replacement.
+        cur_ptr = conn.execute("SELECT version_id FROM file WHERE id=?;", (old_id,)).fetchone()
+        cur_ptr_vid = None if not cur_ptr or cur_ptr[0] is None else int(cur_ptr[0])
+        if removed_old and cur_ptr_vid == vid:
+            repl = conn.execute(
+                """
+                SELECT v.id
+                FROM version_file vf
+                JOIN version v ON v.id=vf.version_id
+                WHERE vf.file_id=? AND COALESCE(v.is_discarded,0)=0
+                ORDER BY v.sort_key DESC, v.id DESC
+                LIMIT 1;
+                """,
+                (old_id,),
+            ).fetchone()
+            new_ptr = None if repl is None else int(repl[0])
+            conn.execute(
+                "UPDATE file SET version_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?;",
+                (new_ptr, old_id),
+            )
+
         _touch_versions(conn, [vid])
-        if moved_from is not None:
-            _touch_versions(conn, [moved_from])
 
         payload: Dict[str, Any] = {
             "added_file_ids": [new_id] if added_new else [],
@@ -435,9 +616,6 @@ def repair_version_membership(
                 }
             ],
         }
-        if moved_from is not None:
-            payload["moved_from_version_id"] = moved_from
-
         note_str = "; ".join(notes) if notes else ""
         extra = f" ({note_str})" if note_str else ""
         summary = f"Repaired version {vid}: replaced file {old_id} → {new_id}{extra}"
@@ -471,11 +649,14 @@ def fork_version(
     replacement_file_ids: Optional[Sequence[int]] = None,
     enforce_unowned: bool = False,
 ) -> ForkResult:
-    """Create a new version and reassign selected membership.
+    """Create a new version based on a source version.
 
-    NOTE: Because `file.version_id` is a single-valued foreign key, files cannot
-    belong to multiple versions simultaneously. This operation *moves* selected
-    file rows from the source version to the new version.
+    In schema v6 this *clones* membership (true snapshots): the source version
+    keeps its members, and the new version starts with a copy of the selected
+    members.
+
+    `file.version_id` is maintained as a best-effort pointer to the latest
+    non-discarded version a file participates in.
     """
 
     src = int(source_version_id)
@@ -489,24 +670,30 @@ def fork_version(
 
     repl_ids = _norm_ids(replacement_file_ids or [])
 
-    # Determine which file rows to move from source.
-    where_missing = "" if include_missing else " AND integrity_state != 'MISSING'"
+    # Determine which file rows to clone from source.
+    where_missing = "" if include_missing else " AND f.integrity_state != 'MISSING'"
     rows = conn.execute(
-        f"SELECT id FROM file WHERE version_id=?{where_missing} ORDER BY id;",
+        f"""
+        SELECT f.id
+        FROM version_file vf
+        JOIN file f ON f.id=vf.file_id
+        WHERE vf.version_id=?{where_missing}
+        ORDER BY f.id;
+        """,
         (src,),
     ).fetchall()
     move_ids = [int(r[0]) for r in rows]
 
-    # Validate replacement ownership if enforcing unowned.
+    # Validate replacement rows.
     if repl_ids:
         frows = _fetch_files(conn, repl_ids)
         missing_repl = [i for i in repl_ids if i not in frows]
         if missing_repl:
             raise ValueError("replacement_file_ids contain missing file rows")
         if enforce_unowned:
+            mem = _fetch_memberships(conn, repl_ids)
             for fid in repl_ids:
-                cur_vid, _integrity, _size = frows[fid]
-                if cur_vid is not None:
+                if mem.get(int(fid)):
                     raise ValueError("replacement_file_ids must be unowned when enforce_unowned=True")
 
     with conn:
@@ -529,43 +716,35 @@ def fork_version(
         )
         new_vid = int(conn.execute("SELECT last_insert_rowid();").fetchone()[0])
 
-        # Move membership from source to new.
+        # Clone membership from source to new.
         if move_ids:
-            conn.execute(
-                f"UPDATE file SET version_id=?, updated_at=CURRENT_TIMESTAMP WHERE id IN ({_ph(len(move_ids))});",
-                (new_vid, *move_ids),
-            )
+            add_files_to_version(conn, version_id=new_vid, file_ids=move_ids, ignore_duplicates=True)
 
         added_repl: List[int] = []
-        moved_from_other: List[Dict[str, Any]] = []
         if repl_ids:
-            # Attach replacements to new; allow reassignment unless enforce_unowned.
-            current = _fetch_files(conn, repl_ids)
-            to_attach: List[int] = []
-            skipped_owned = 0
-            for fid in repl_ids:
-                cur_vid, _integrity, _size = current[fid]
-                if cur_vid == new_vid:
-                    continue
-                if cur_vid is not None and enforce_unowned:
-                    skipped_owned += 1
-                    continue
-                if cur_vid is not None and int(cur_vid) != new_vid:
-                    moved_from_other.append({"file_id": fid, "from_version_id": int(cur_vid)})
-                to_attach.append(fid)
-            if to_attach:
-                conn.execute(
-                    f"UPDATE file SET version_id=?, updated_at=CURRENT_TIMESTAMP WHERE id IN ({_ph(len(to_attach))});",
-                    (new_vid, *to_attach),
-                )
-                added_repl = list(to_attach)
-            if moved_from_other:
-                _touch_versions(conn, [int(m["from_version_id"]) for m in moved_from_other])
-            if skipped_owned:
-                # Represent skipped owned as a note in payload.
-                pass
+            # Attach replacements to new (membership table). Ownership enforcement handled above.
+            add_files_to_version(conn, version_id=new_vid, file_ids=repl_ids, ignore_duplicates=True)
+            added_repl = list(repl_ids)
 
-        # Touch only the new version (per plan).
+        # Update convenience pointer for any files newly participating in the forked version.
+        all_ids = _norm_ids([*move_ids, *added_repl])
+        if all_ids:
+            row_sk = conn.execute("SELECT sort_key FROM version WHERE id=? LIMIT 1;", (new_vid,)).fetchone()
+            target_sk = int(row_sk[0]) if row_sk else 0
+            if target_sk > 0:
+                conn.execute(
+                    f"""
+                    UPDATE file
+                    SET version_id=?, updated_at=CURRENT_TIMESTAMP
+                    WHERE id IN ({_ph(len(all_ids))})
+                      AND (
+                        version_id IS NULL OR
+                        COALESCE((SELECT sort_key FROM version WHERE id=file.version_id), -1) < ?
+                      );
+                    """,
+                    (new_vid, *all_ids, int(target_sk)),
+                )
+
         _touch_versions(conn, [new_vid])
 
         payload: Dict[str, Any] = {
@@ -573,14 +752,8 @@ def fork_version(
             "moved_file_ids": move_ids,
             "added_file_ids": added_repl,
             "include_missing": bool(include_missing),
+            "notes": ["Fork clones membership via version_file."],
         }
-        notes: List[str] = [
-            "Fork moves file membership because file.version_id is single-valued.",
-        ]
-        if moved_from_other:
-            payload["moved_from"] = moved_from_other
-        if notes:
-            payload["notes"] = notes
 
         summary = (
             f"Forked version {src} → new version {new_vid} "

@@ -274,150 +274,166 @@ def apply_detection_proposals(
             desired = item.desired_sort_key
             version = None
 
-            # Stage 9.2 Ext: version-up merge into existing assets.
-            # If an asset already exists and the incoming files specify a newer version
-            # number, create that version and carry forward the previous membership.
-            if desired is not None and existed_before:
-                # If the desired version already exists, just attach into it.
-                existing = get_version_by_asset_sort_key(conn, asset_id=int(asset.id), sort_key=int(desired))
-                if existing is not None:
-                    version = existing
-                else:
-                    # Determine the latest non-discarded version to carry forward from.
-                    row = conn.execute(
-                        """
-                        SELECT id, sort_key
-                        FROM version
-                        WHERE asset_id=? AND is_discarded=0
-                        ORDER BY sort_key DESC
-                        LIMIT 1;
-                        """,
-                        (int(asset.id),),
-                    ).fetchone()
-                    src_vid = int(row[0]) if row is not None else 0
-                    src_sort = int(row[1]) if row is not None else 0
+            # Stage 9.2.4: Composite assets version-up by cloning the latest non-discarded
+            # version and overriding only the roles present in the incoming set.
+            if existed_before and t in {"texture_set", "image_sequence"}:
+                # Determine the latest non-discarded version (base).
+                row = conn.execute(
+                    """
+                    SELECT id, sort_key
+                    FROM version
+                    WHERE asset_id=? AND is_discarded=0
+                    ORDER BY sort_key DESC
+                    LIMIT 1;
+                    """,
+                    (int(asset.id),),
+                ).fetchone()
+                base_vid = int(row[0]) if row is not None else 0
+                base_sort = int(row[1]) if row is not None else 0
 
-                    if src_vid > 0 and int(desired) > int(src_sort):
-                        # Create the new version explicitly at the desired sort_key.
-                        version = create_version(
-                            conn,
-                            asset_id=int(asset.id),
-                            sort_key_override=int(desired),
-                            commit=False,
-                        )
-                        created_versions += 1
+                # Create the new asset version monotonically.
+                next_sort = int(base_sort) + 1 if base_sort > 0 else 1
+                version = create_version(
+                    conn,
+                    asset_id=int(asset.id),
+                    sort_key_override=int(next_sort),
+                    commit=False,
+                )
+                created_versions += 1
 
-                        # Build replacement "roles" for incoming files so we can keep
-                        # replaced files in the source version (history), while migrating
-                        # unchanged members forward.
-                        ph_in = ",".join(["?"] * len(fids))
-                        in_rows = conn.execute(
-                            f"SELECT id, relative_path FROM file WHERE id IN ({ph_in});",
-                            tuple(fids),
-                        ).fetchall()
-                        replace_roles: set[str] = set()
-                        for _fid, _rel in in_rows:
-                            base = os.path.basename(str(_rel or ""))
-                            stem = os.path.splitext(base)[0]
-                            replace_roles.add(strip_version_token(stem))
+                # Build a base snapshot selection: latest available file per role
+                # across all active (non-discarded) versions of the asset. This
+                # preserves robustness for legacy/incomplete histories.
+                rows_latest = conn.execute(
+                    """
+                    SELECT f.id, f.relative_path, v.sort_key
+                    FROM version_file vf
+                    JOIN version v ON v.id=vf.version_id
+                    JOIN file f ON f.id=vf.file_id
+                    WHERE v.asset_id=? AND v.is_discarded=0
+                    ORDER BY v.sort_key DESC, f.id DESC;
+                    """,
+                    (int(asset.id),),
+                ).fetchall()
 
-                        src_rows = conn.execute(
-                            """
-                            SELECT id, relative_path, integrity_state
-                            FROM file
-                            WHERE version_id=?
-                            ORDER BY id ASC;
-                            """,
-                            (int(src_vid),),
-                        ).fetchall()
+                base_by_role: Dict[str, int] = {}
+                for fid0, rel0, _sk0 in rows_latest:
+                    role0 = _role_key_from_relpath(str(rel0 or ""))
+                    if role0 not in base_by_role:
+                        base_by_role[role0] = int(fid0)
 
-                        move_ids: List[int] = []
-                        for fid0, rel0, integrity0 in src_rows:
-                            if str(integrity0 or "") == "MISSING":
-                                continue
-                            base0 = os.path.basename(str(rel0 or ""))
-                            stem0 = os.path.splitext(base0)[0]
-                            role0 = strip_version_token(stem0)
-                            if role0 in replace_roles:
-                                continue
-                            move_ids.append(int(fid0))
+                base_file_ids = list(base_by_role.values())
+                if base_file_ids:
+                    conn.executemany(
+                        "INSERT OR IGNORE INTO version_file(version_id, file_id) VALUES (?, ?);",
+                        [(int(version.id), int(fid0)) for fid0 in base_file_ids],
+                    )
 
-                        if move_ids:
-                            ph = ",".join(["?"] * len(move_ids))
-                            conn.execute(
-                                f"UPDATE file SET version_id=?, updated_at=CURRENT_TIMESTAMP WHERE id IN ({ph});",
-                                (int(version.id), *move_ids),
-                            )
+                # Current role map (starts from base snapshot selection).
+                cur_by_role: Dict[str, int] = dict(base_by_role)
 
-                        # Touch both source + new versions so UI refreshes show updated timestamps.
+                # Incoming role map.
+                ph_in = ",".join(["?"] * len(fids))
+                in_rows = conn.execute(
+                    f"SELECT id, relative_path FROM file WHERE id IN ({ph_in});",
+                    tuple(fids),
+                ).fetchall()
+                in_by_role: Dict[str, int] = {}
+                for fid0, rel0 in in_rows:
+                    role0 = _role_key_from_relpath(str(rel0 or ""))
+                    in_by_role[role0] = int(fid0)
+
+                # Strict: all incoming file rows must exist.
+                if len(in_rows) != len(fids):
+                    missing_n = len(fids) - len(in_rows)
+                    skipped_missing += int(missing_n)
+                    raise ValueError(
+                        f"Detection apply failed: {missing_n} incoming file row(s) missing during composite version-up for version_id={int(version.id)}"
+                    )
+
+                # Count how many incoming files were truly unowned before we attach.
+                owned_lookup = conn.execute(
+                    f"SELECT file_id FROM version_file WHERE file_id IN ({ph_in});",
+                    tuple(fids),
+                ).fetchall()
+                owned_set = {int(r[0]) for r in owned_lookup}
+                attached_unowned_ids = [int(fid0) for fid0 in fids if int(fid0) not in owned_set]
+                attached_files += int(len(attached_unowned_ids))
+
+                removed_ids: List[int] = []
+                replaced: List[Dict[str, Any]] = []
+
+                # Override roles in the new version: remove old role member (if any), add incoming.
+                for role, new_fid in sorted(in_by_role.items()):
+                    old_fid = cur_by_role.get(role)
+                    if old_fid is not None and int(old_fid) != int(new_fid):
                         conn.execute(
-                            "UPDATE version SET updated_at=CURRENT_TIMESTAMP WHERE id IN (?, ?);",
-                            (int(src_vid), int(version.id)),
+                            "DELETE FROM version_file WHERE version_id=? AND file_id=?;",
+                            (int(version.id), int(old_fid)),
                         )
+                        removed_ids.append(int(old_fid))
+                        replaced.append({"role": role, "old_file_id": int(old_fid), "new_file_id": int(new_fid)})
+                    conn.execute(
+                        "INSERT OR IGNORE INTO version_file(version_id, file_id) VALUES (?, ?);",
+                        (int(version.id), int(new_fid)),
+                    )
 
-                        payload_extra: Dict[str, Any] = {
-                            "source_version_id": int(src_vid),
-                            "carried_forward_file_ids": move_ids,
-                            "kept_in_source_roles": sorted(replace_roles),
-                        }
+                # Update convenience pointer for all files participating in the new snapshot.
+                final_ids = sorted(({*base_file_ids, *[int(x) for x in fids]}) - set(removed_ids))
+                if final_ids:
+                    ph_all = ",".join(["?"] * len(final_ids))
+                    conn.execute(
+                        f"""
+                        UPDATE file
+                        SET version_id=?, updated_at=CURRENT_TIMESTAMP
+                        WHERE id IN ({ph_all})
+                          AND (
+                            version_id IS NULL OR
+                            COALESCE((SELECT sort_key FROM version WHERE id=file.version_id), -1) < ?
+                          );
+                        """,
+                        (int(version.id), *tuple(final_ids), int(next_sort)),
+                    )
 
-                        attach = attach_files_to_version(
-                            conn,
-                            version_id=int(version.id),
-                            file_ids=fids,
-                            enforce_unowned=True,
-                            use_transaction=False,
-                            write_log=False,
-                            payload_extra=payload_extra,
-                        )
+                # Touch versions involved.
+                touched = [int(version.id)]
+                if base_vid > 0:
+                    touched.append(int(base_vid))
+                conn.execute(
+                    f"UPDATE version SET updated_at=CURRENT_TIMESTAMP WHERE id IN ({','.join(['?']*len(touched))});",
+                    tuple(touched),
+                )
 
-                        if attach.missing_file_rows:
-                            skipped_missing += int(attach.missing_file_rows)
-                            raise ValueError(
-                                f"Detection apply failed: {attach.missing_file_rows} file row(s) were missing for version_id={int(version.id)}"
-                            )
+                payload: Dict[str, Any] = {
+                    "source": "detection",
+                    "storage_id": sid,
+                    "asset_id": int(asset.id),
+                    "asset_type": t,
+                    "asset_key": k,
+                    "asset_name": n,
+                    "version_id": int(version.id),
+                    "source_version_id": int(base_vid),
+                    "added_file_ids": attached_unowned_ids,
+                    "removed_file_ids": removed_ids,
+                    "replaced": replaced,
+                }
 
-                        attached_files += int(attach.attached)
-                        skipped_owned += int(attach.skipped_owned)
+                summary = (
+                    f"Detect apply: asset '{n}' ({t}) → {version.label}; "
+                    f"base {('none' if base_vid==0 else 'v'+str(base_sort).zfill(2))}; "
+                    f"attached {len(attached_unowned_ids)} new files"
+                )
 
-                        payload: Dict[str, Any] = {
-                            "source": "detection",
-                            "storage_id": sid,
-                            "asset_id": int(asset.id),
-                            "asset_type": t,
-                            "asset_key": k,
-                            "asset_name": n,
-                            "version_id": int(version.id),
-                            "source_version_id": int(src_vid),
-                            "carried_forward_file_ids": move_ids,
-                            "added_file_ids": _norm_ids(fids) if attach.attached else [],
-                            "skipped_owned": int(attach.skipped_owned),
-                        }
+                write_version_change_log(
+                    conn,
+                    version_id=int(version.id),
+                    action_type="version_up_merge",
+                    summary=summary,
+                    payload=payload,
+                )
 
-                        # Record only the actually attached file ids (subset of the proposal fids).
-                        rows2 = conn.execute(
-                            f"SELECT id FROM file WHERE id IN ({ph_in}) AND version_id=? ORDER BY id ASC;",
-                            (*tuple(fids), int(version.id)),
-                        ).fetchall()
-                        payload["added_file_ids"] = [int(r[0]) for r in rows2]
-
-                        summary = (
-                            f"Detect apply: asset '{n}' ({t}) → {version.label}; "
-                            f"carried {len(move_ids)} files; attached {int(attach.attached)} files"
-                        )
-                        if attach.skipped_owned:
-                            summary += f" (skipped {int(attach.skipped_owned)} owned)"
-
-                        write_version_change_log(
-                            conn,
-                            version_id=int(version.id),
-                            action_type="version_up_merge",
-                            summary=summary,
-                            payload=payload,
-                        )
-
-                        summaries.append(summary)
-                        continue
+                summaries.append(summary)
+                continue
 
             # Default path: create/find the desired version or auto-increment.
             if version is None:

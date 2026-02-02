@@ -27,6 +27,7 @@ def test_initialize_schema_creates_tables(tmp_path) -> None:
     assert "asset" in tables
     assert "version" in tables
     assert "version_change_log" in tables
+    assert "version_file" in tables
     assert "file" in tables
     assert "tag" in tables
     assert "asset_tag" in tables
@@ -44,10 +45,10 @@ def test_initialize_schema_is_idempotent(tmp_path) -> None:
 
     row = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()
     assert row is not None
-    assert row[0] == 5
+    assert row[0] == 6
 
 
-def test_initialize_schema_migrates_v1_to_v5(tmp_path) -> None:
+def test_initialize_schema_migrates_v1_to_latest(tmp_path) -> None:
     """Migrating an existing v1-era DB should reach the latest schema."""
     db_path = tmp_path / "assethub_test.sqlite3"
     conn = sqlite3.connect(db_path)
@@ -106,10 +107,10 @@ def test_initialize_schema_migrates_v1_to_v5(tmp_path) -> None:
 
     row = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()
     assert row is not None
-    assert row[0] == 5
+    assert row[0] == 6
 
 
-def test_initialize_schema_migrates_v2_to_v5_and_preserves_ids(tmp_path) -> None:
+def test_initialize_schema_migrates_v2_to_latest_and_preserves_ids(tmp_path) -> None:
     """v2 -> v4 rebuilds should preserve ids (file.version_id stability)."""
     db_path = tmp_path / "assethub_test.sqlite3"
     conn = sqlite3.connect(db_path)
@@ -196,15 +197,21 @@ def test_initialize_schema_migrates_v2_to_v5_and_preserves_ids(tmp_path) -> None
     assert row[3] == 1
     assert row[4] == 'vNN'
 
-    # File still points at the same version id.
+    # File still points at the same version id (legacy pointer preserved).
     row = conn.execute("SELECT version_id FROM file WHERE id=9;").fetchone()
     assert row is not None
     assert row[0] == 5
 
-    # v4 bookkeeping.
+    # v6 bookkeeping.
     row = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()
     assert row is not None
-    assert row[0] == 5
+    assert row[0] == 6
+
+    # v6: membership join table should be backfilled from legacy file.version_id.
+    row = conn.execute(
+        "SELECT 1 FROM version_file WHERE version_id=5 AND file_id=9 LIMIT 1;"
+    ).fetchone()
+    assert row is not None
 
 
 def test_initialize_schema_migrates_v3_to_v4_adds_tag_color(tmp_path) -> None:
@@ -234,4 +241,4 @@ def test_initialize_schema_migrates_v3_to_v4_adds_tag_color(tmp_path) -> None:
     assert "color" in tag_cols
     row = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()
     assert row is not None
-    assert row[0] == 5
+    assert row[0] == 6
