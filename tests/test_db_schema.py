@@ -44,10 +44,10 @@ def test_initialize_schema_is_idempotent(tmp_path) -> None:
 
     row = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()
     assert row is not None
-    assert row[0] == 4
+    assert row[0] == 5
 
 
-def test_initialize_schema_migrates_v1_to_v4(tmp_path) -> None:
+def test_initialize_schema_migrates_v1_to_v5(tmp_path) -> None:
     """Migrating an existing v1-era DB should reach the latest schema."""
     db_path = tmp_path / "assethub_test.sqlite3"
     conn = sqlite3.connect(db_path)
@@ -90,6 +90,8 @@ def test_initialize_schema_migrates_v1_to_v4(tmp_path) -> None:
     assert "label" in version_cols
     assert "sort_key" in version_cols
     assert "scheme" in version_cols
+    assert "is_discarded" in version_cols
+    assert "user_label" in version_cols
     assert "updated_at" in version_cols
 
     file_cols = [r[1] for r in conn.execute("PRAGMA table_info(file);").fetchall()]
@@ -104,10 +106,10 @@ def test_initialize_schema_migrates_v1_to_v4(tmp_path) -> None:
 
     row = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()
     assert row is not None
-    assert row[0] == 4
+    assert row[0] == 5
 
 
-def test_initialize_schema_migrates_v2_to_v4_and_preserves_ids(tmp_path) -> None:
+def test_initialize_schema_migrates_v2_to_v5_and_preserves_ids(tmp_path) -> None:
     """v2 -> v4 rebuilds should preserve ids (file.version_id stability)."""
     db_path = tmp_path / "assethub_test.sqlite3"
     conn = sqlite3.connect(db_path)
@@ -202,7 +204,7 @@ def test_initialize_schema_migrates_v2_to_v4_and_preserves_ids(tmp_path) -> None
     # v4 bookkeeping.
     row = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()
     assert row is not None
-    assert row[0] == 4
+    assert row[0] == 5
 
 
 def test_initialize_schema_migrates_v3_to_v4_adds_tag_color(tmp_path) -> None:
@@ -232,4 +234,4 @@ def test_initialize_schema_migrates_v3_to_v4_adds_tag_color(tmp_path) -> None:
     assert "color" in tag_cols
     row = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()
     assert row is not None
-    assert row[0] == 4
+    assert row[0] == 5

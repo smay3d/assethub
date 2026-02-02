@@ -63,14 +63,14 @@ def list_assets(
             (
                 SELECT v.id
                 FROM version v
-                WHERE v.asset_id=a.id
+                WHERE v.asset_id=a.id AND COALESCE(v.is_discarded, 0)=0
                 ORDER BY v.sort_key DESC
                 LIMIT 1
             ) AS latest_version_id,
             COALESCE((
                 SELECT v.label
                 FROM version v
-                WHERE v.asset_id=a.id
+                WHERE v.asset_id=a.id AND COALESCE(v.is_discarded, 0)=0
                 ORDER BY v.sort_key DESC
                 LIMIT 1
             ), '') AS latest_version_label,
@@ -89,7 +89,9 @@ def list_assets(
                 SELECT COUNT(1)
                 FROM file f
                 JOIN version v2 ON v2.id=f.version_id
-                WHERE v2.asset_id=a.id AND f.integrity_state='MISSING'
+                WHERE v2.asset_id=a.id
+                  AND f.integrity_state='MISSING'
+                  AND COALESCE(v2.is_discarded, 0)=0
             ) AS missing_count
         FROM asset a
         {where}

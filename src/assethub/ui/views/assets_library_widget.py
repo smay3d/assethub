@@ -9,7 +9,9 @@ from PySide6.QtCore import Qt, QSortFilterProxyModel, Signal, QItemSelectionMode
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -25,6 +27,12 @@ from assethub.context import AppContext
 from assethub.core.events.event_hub import DbChanged
 from assethub.core.db.asset_library import AssetRow, list_assets, list_files_for_version, list_versions
 from assethub.core.db.tags import list_tags, list_tags_for_asset_ids, add_tags_to_assets, remove_tags_from_assets
+from assethub.core.db.versions import (
+    get_version,
+    set_version_discarded,
+    set_version_sort_key,
+    set_version_user_label,
+)
 from assethub.core.model.tag import Tag
 from assethub.core.model.version import Version
 from assethub.ui.actions.library_actions import LibraryActions
@@ -234,8 +242,15 @@ class AssetsLibraryWidget(QWidget):
         self._asset_proxy = _AssetFilterProxy(self)
         self._asset_proxy.setSourceModel(self._asset_model)
 
+        self._chk_show_discarded = QCheckBox("Show discarded", self)
+        self._chk_show_discarded.setChecked(False)
+
         self._versions_list = QListWidget(self)
         self._versions_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._versions_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._versions_list.customContextMenuRequested.connect(self._on_versions_context_menu)
+        self._versions_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._versions_list.customContextMenuRequested.connect(self._on_versions_context_menu)
 
         self._files_model = QStandardItemModel(self)
         self._files_model.setHorizontalHeaderLabels(["Path", "State"])
@@ -389,6 +404,7 @@ class AssetsLibraryWidget(QWidget):
         v_layout = QVBoxLayout(versions_wrap)
         v_layout.setContentsMargins(0, 0, 0, 0)
         v_layout.addWidget(QLabel("Versions", versions_wrap))
+        v_layout.addWidget(self._chk_show_discarded)
         v_layout.addWidget(self._versions_list)
 
         # Files table
@@ -408,6 +424,7 @@ class AssetsLibraryWidget(QWidget):
         if sel is not None:
             sel.selectionChanged.connect(lambda *_: self._on_asset_selection_changed())
         self._versions_list.currentItemChanged.connect(lambda *_: self._on_version_selection_changed())
+        self._chk_show_discarded.stateChanged.connect(lambda *_: self._refresh_detail_preserve_selection())
 
     # -----------------
     # Selection helpers
@@ -477,19 +494,48 @@ class AssetsLibraryWidget(QWidget):
 
         # Load versions
         vers = list_versions(self.context.db_connection, asset_id=asset_id)
-        self._populate_versions(vers)
+        visible = self._visible_versions(vers)
+        self._populate_versions(visible)
 
-        # Select latest by default
-        if vers:
-            latest = vers[-1]
+        # Select latest visible by default
+        if visible:
+            latest = visible[-1]
             self._select_version_id(latest.id)
         else:
             self._files_model.removeRows(0, self._files_model.rowCount())
 
+    def _visible_versions(self, versions: List[Version]) -> List[Version]:
+        """Filter versions based on the "show discarded" toggle."""
+
+        if self._chk_show_discarded.isChecked():
+            return list(versions)
+        return [v for v in versions if int(getattr(v, "is_discarded", 0) or 0) == 0]
+
+    def _refresh_detail_preserve_selection(self) -> None:
+        """Refresh version list without clobbering the current selection."""
+
+        if self._selected.asset_id is None:
+            return
+
+        prev_vid = self._selected.version_id
+        vers = list_versions(self.context.db_connection, asset_id=int(self._selected.asset_id))
+        visible = self._visible_versions(vers)
+        self._populate_versions(visible)
+        if prev_vid is not None:
+            self._select_version_id(int(prev_vid))
+        # Trigger file refresh (or clear) after potential selection change.
+        self._on_version_selection_changed()
+
     def _populate_versions(self, versions: List[Version]) -> None:
         self._versions_list.clear()
         for v in versions:
-            it = QListWidgetItem(f"{v.label}")
+            text = str(v.label)
+            ul = str(getattr(v, "user_label", "") or "").strip()
+            if ul:
+                text = f"{text}  —  {ul}"
+            if int(getattr(v, "is_discarded", 0) or 0):
+                text = f"{text}  [discarded]"
+            it = QListWidgetItem(text)
             it.setData(Qt.ItemDataRole.UserRole, int(v.id))
             it.setToolTip(f"sort_key={v.sort_key}")
             self._versions_list.addItem(it)
@@ -577,6 +623,101 @@ class AssetsLibraryWidget(QWidget):
                 if fid > 0:
                     return fid
         return None
+
+    def _current_version_id(self) -> Optional[int]:
+        item = self._versions_list.currentItem()
+        if item is None:
+            return None
+        try:
+            vid = int(item.data(Qt.ItemDataRole.UserRole) or 0)
+        except Exception:
+            vid = 0
+        return vid if vid > 0 else None
+
+    def _on_versions_context_menu(self, pos) -> None:
+        # No version selected → nothing to edit.
+        item = self._versions_list.itemAt(pos)
+        if item is None:
+            return
+
+        try:
+            vid = int(item.data(Qt.ItemDataRole.UserRole) or 0)
+        except Exception:
+            vid = 0
+        if vid <= 0:
+            return
+
+        conn = self.context.db_connection
+        if conn is None:
+            return
+
+        v = get_version(conn, version_id=int(vid))
+
+        menu = QMenu(self)
+
+        act_set_label = menu.addAction("Set label…")
+        act_set_number = menu.addAction("Edit version number…")
+        menu.addSeparator()
+
+        if int(getattr(v, "is_discarded", 0) or 0):
+            act_discard = menu.addAction("Restore version")
+        else:
+            act_discard = menu.addAction("Mark version as discarded")
+
+        def _apply_and_refresh(new_vid: Optional[int] = None) -> None:
+            # Preserve selection through refresh.
+            self._pending_restore.asset_id = self._selected.asset_id
+            self._pending_restore.version_id = new_vid if new_vid is not None else vid
+            self.refresh()
+
+        def _on_set_label() -> None:
+            current = str(getattr(v, "user_label", "") or "")
+            text, ok = QInputDialog.getText(self, "Version label", "Label (optional):", text=current)
+            if not ok:
+                return
+            try:
+                set_version_user_label(conn, version_id=int(vid), user_label=str(text))
+            except Exception as e:
+                QMessageBox.warning(self, "AssetHub", f"Failed to set label: {e}")
+                return
+            _apply_and_refresh()
+
+        def _on_set_number() -> None:
+            val, ok = QInputDialog.getInt(
+                self,
+                "Version number",
+                "Version number (used for vNN sorting):",
+                value=int(getattr(v, "sort_key", 1) or 1),
+                min=0,
+                max=999999,
+            )
+            if not ok:
+                return
+            try:
+                set_version_sort_key(conn, version_id=int(vid), new_sort_key=int(val))
+            except Exception as e:
+                QMessageBox.warning(self, "AssetHub", f"Failed to update version number: {e}")
+                return
+            _apply_and_refresh()
+
+        def _on_toggle_discard() -> None:
+            target = 0 if int(getattr(v, "is_discarded", 0) or 0) else 1
+            try:
+                set_version_discarded(conn, version_id=int(vid), is_discarded=target)
+            except Exception as e:
+                QMessageBox.warning(self, "AssetHub", f"Failed to update discard state: {e}")
+                return
+            # If we just discarded the selected version and "show discarded" is off,
+            # selection might disappear; keep asset selection, fall back to latest.
+            self._pending_restore.asset_id = self._selected.asset_id
+            self._pending_restore.version_id = vid
+            self.refresh()
+
+        act_set_label.triggered.connect(_on_set_label)
+        act_set_number.triggered.connect(_on_set_number)
+        act_discard.triggered.connect(_on_toggle_discard)
+
+        menu.exec(self._versions_list.viewport().mapToGlobal(pos))
 
     def _on_assets_context_menu(self, pos) -> None:
         idx = self._assets_view.indexAt(pos)

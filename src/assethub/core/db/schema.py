@@ -24,7 +24,7 @@ import sqlite3
 from typing import Callable, Dict
 
 
-LATEST_SCHEMA_VERSION = 4
+LATEST_SCHEMA_VERSION = 5
 
 
 def get_schema_version(conn: sqlite3.Connection) -> int:
@@ -88,6 +88,8 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
         label       TEXT NOT NULL,
         sort_key    INTEGER NOT NULL,
         scheme      TEXT NOT NULL DEFAULT 'vNN',
+        is_discarded INTEGER NOT NULL DEFAULT 0,
+        user_label  TEXT NOT NULL DEFAULT '',
         created_at  TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
         updated_at  TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
         UNIQUE(asset_id, sort_key),
@@ -263,6 +265,25 @@ def _migrate_to_v4(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tag ADD COLUMN color TEXT NOT NULL DEFAULT '#808080';")
 
     _record_schema_version(conn, 4)
+
+
+def _migrate_to_v5(conn: sqlite3.Connection) -> None:
+    """Migrate to schema v5.
+
+    v5 adds version realism metadata:
+      - version.is_discarded INTEGER NOT NULL DEFAULT 0
+      - version.user_label  TEXT NOT NULL DEFAULT ''
+
+    Migration is forward-only and idempotent.
+    """
+
+    cols = [str(r[1]) for r in conn.execute("PRAGMA table_info(version);").fetchall()]
+    if "is_discarded" not in cols:
+        conn.execute("ALTER TABLE version ADD COLUMN is_discarded INTEGER NOT NULL DEFAULT 0;")
+    if "user_label" not in cols:
+        conn.execute("ALTER TABLE version ADD COLUMN user_label TEXT NOT NULL DEFAULT '';")
+
+    _record_schema_version(conn, 5)
 
 
 def _ensure_unmanaged_storage_row(conn: sqlite3.Connection) -> int:
@@ -479,4 +500,5 @@ _MIGRATIONS: Dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_to_v2,
     3: _migrate_to_v3,
     4: _migrate_to_v4,
+    5: _migrate_to_v5,
 }

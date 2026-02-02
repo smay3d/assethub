@@ -34,8 +34,14 @@ from assethub.core.storage.roots import StorageManager, StorageRoot
 from assethub.core.events.event_hub import DbChanged, ScanFinished, HealthFinished
 from assethub.core.detection.rules_loader import load_detection_ruleset
 from assethub.core.detection.engine import detect_proposals_for_storage
-from assethub.core.detection.apply import apply_detection_proposals
+from assethub.core.detection.apply import (
+    apply_detection_proposals,
+    plan_apply_items,
+    expand_conflict_resolution,
+    VersionConflict,
+)
 from assethub.ui.dialogs.detect_assets_dialog import DetectAssetsDialog
+from assethub.ui.dialogs.version_conflict_dialog import VersionConflictDialog
 
 
 class _WorkerSignals(QObject):
@@ -455,8 +461,42 @@ class ScanTab(QWidget):
             QMessageBox.information(self, "AssetHub", "No files were selected. Nothing to apply.")
             return
 
+        # Stage 9.2: Version realism. Pre-flight the selected files for
+        # mismatched version numbers (e.g. albedo v03 + normal v05). If found,
+        # prompt the user to split or force a target version.
+        planned_items, conflicts = plan_apply_items(conn, items=apply_items)
+        final_items = list(planned_items)
+        if conflicts:
+            for c in conflicts:
+                # Build a compact preview list using our existing file_map.
+                ver_to_files: dict[Optional[int], List[str]] = {}
+                for vn, ids in c.version_to_file_ids.items():
+                    ver_to_files[vn] = [file_map.get(int(fid), f"<file id {int(fid)}>") for fid in ids]
+
+                cd = VersionConflictDialog(
+                    parent=self,
+                    asset_name=str(c.item.name),
+                    version_to_files=ver_to_files,
+                )
+                if cd.exec() != QDialog.Accepted:
+                    try:
+                        self.context.log.info("Detect assets: version conflict resolution canceled")
+                    except Exception:
+                        pass
+                    return
+
+                r = cd.resolution()
+                if r is None:
+                    return
+
+                final_items.extend(
+                    expand_conflict_resolution(
+                        c, mode=str(r.mode), forced_version=r.forced_version
+                    )
+                )
+
         try:
-            res = apply_detection_proposals(conn, storage_id=int(root.id), items=apply_items)
+            res = apply_detection_proposals(conn, storage_id=int(root.id), items=final_items)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "AssetHub", f"Failed to apply proposals:\n\n{exc}")
             try:

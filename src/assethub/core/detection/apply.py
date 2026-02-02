@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from typing import Any, Dict, List, Sequence
+import os
+from typing import Any, Dict, List, Sequence, Optional, Tuple
 
 from assethub.core.db.assets import create_asset
-from assethub.core.db.versions import create_version
+from assethub.core.db.versions import create_version, get_version_by_asset_sort_key
 from assethub.core.db.version_membership import attach_files_to_version, write_version_change_log
+from assethub.core.detection.version_parse import parse_version_num
 
 
 @dataclass(frozen=True)
@@ -28,6 +30,15 @@ class ApplyItem:
     key: str
     name: str
     file_ids: List[int]
+    desired_sort_key: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class VersionConflict:
+    """A detection proposal contains multiple distinct version numbers."""
+
+    item: ApplyItem
+    version_to_file_ids: Dict[Optional[int], List[int]]
 
 
 @dataclass(frozen=True)
@@ -53,6 +64,116 @@ def _norm_ids(ids: Sequence[int]) -> List[int]:
         seen.add(i)
         out.append(i)
     return out
+
+
+def plan_apply_items(
+    conn: sqlite3.Connection,
+    *,
+    items: Sequence[ApplyItem],
+) -> Tuple[List[ApplyItem], List[VersionConflict]]:
+    """Split ApplyItems by parsed version number and detect mismatches.
+
+    Returns:
+        planned_items: ApplyItems where each item maps to *one* version number
+            (or None for unversioned).
+        conflicts: items whose members contain multiple distinct parsed version numbers.
+    """
+
+    planned: List[ApplyItem] = []
+    conflicts: List[VersionConflict] = []
+
+    for it in items:
+        fids = _norm_ids(it.file_ids)
+        if not fids:
+            continue
+
+        # Fetch relative paths for parsing.
+        ph = ",".join(["?"] * len(fids))
+        rows = conn.execute(
+            f"SELECT id, relative_path FROM file WHERE id IN ({ph});",
+            tuple(fids),
+        ).fetchall()
+        path_by_id = {int(r[0]): str(r[1] or "") for r in rows}
+
+        ver_to_ids: Dict[Optional[int], List[int]] = {}
+        for fid in fids:
+            rel = path_by_id.get(int(fid), "")
+            base = os.path.basename(str(rel))
+            vnum = parse_version_num(base)
+            ver_to_ids.setdefault(vnum, []).append(int(fid))
+
+        if len(ver_to_ids.keys()) <= 1:
+            only_key = next(iter(ver_to_ids.keys()))
+            planned.append(
+                ApplyItem(
+                    type=str(it.type),
+                    key=str(it.key),
+                    name=str(it.name),
+                    file_ids=list(ver_to_ids.get(only_key, [])),
+                    desired_sort_key=only_key,
+                )
+            )
+            continue
+
+        # Conflict: multiple distinct versions in one proposed asset.
+        conflicts.append(VersionConflict(item=it, version_to_file_ids=ver_to_ids))
+
+    return planned, conflicts
+
+
+def expand_conflict_resolution(
+    conflict: VersionConflict,
+    *,
+    mode: str,
+    forced_version: Optional[int] = None,
+) -> List[ApplyItem]:
+    """Expand a single VersionConflict into ApplyItems.
+
+    Args:
+        conflict: The conflict to resolve.
+        mode: 'split' or 'force'.
+        forced_version: Required when mode=='force'. Use None to force unversioned.
+    """
+
+    m = str(mode).strip().lower()
+    if m not in {"split", "force"}:
+        raise ValueError("mode must be 'split' or 'force'")
+
+    base = conflict.item
+    if m == "split":
+        out: List[ApplyItem] = []
+        # Deterministic: numeric versions in ascending order, then None.
+        keys = sorted([k for k in conflict.version_to_file_ids.keys() if k is not None])
+        if None in conflict.version_to_file_ids:
+            keys.append(None)
+        for k in keys:
+            out.append(
+                ApplyItem(
+                    type=str(base.type),
+                    key=str(base.key),
+                    name=str(base.name),
+                    file_ids=list(conflict.version_to_file_ids.get(k, [])),
+                    desired_sort_key=k,
+                )
+            )
+        return out
+
+    # force
+    if forced_version is not None and int(forced_version) <= 0:
+        raise ValueError("forced_version must be positive or None")
+    all_ids: List[int] = []
+    for ids in conflict.version_to_file_ids.values():
+        all_ids.extend([int(x) for x in ids])
+    all_ids = _norm_ids(all_ids)
+    return [
+        ApplyItem(
+            type=str(base.type),
+            key=str(base.key),
+            name=str(base.name),
+            file_ids=all_ids,
+            desired_sort_key=(None if forced_version is None else int(forced_version)),
+        )
+    ]
 
 
 def apply_detection_proposals(
@@ -120,8 +241,24 @@ def apply_detection_proposals(
                 created_assets += 1
                 existing_asset_keys.add(ident)
 
-            version = create_version(conn, asset_id=int(asset.id), commit=False)
-            created_versions += 1
+            desired = item.desired_sort_key
+            if desired is not None:
+                existing = get_version_by_asset_sort_key(
+                    conn, asset_id=int(asset.id), sort_key=int(desired)
+                )
+                if existing is not None:
+                    version = existing
+                else:
+                    version = create_version(
+                        conn,
+                        asset_id=int(asset.id),
+                        sort_key_override=int(desired),
+                        commit=False,
+                    )
+                    created_versions += 1
+            else:
+                version = create_version(conn, asset_id=int(asset.id), commit=False)
+                created_versions += 1
 
             attach = attach_files_to_version(
                 conn,

@@ -76,7 +76,17 @@ def fetch_file_records(conn: sqlite3.Connection, file_ids: Iterable[int]) -> Lis
 
 def fetch_missing_file_ids(conn: sqlite3.Connection) -> List[int]:
     """Return file ids for records currently marked MISSING."""
-    rows = conn.execute("SELECT id FROM file WHERE UPPER(integrity_state)='MISSING' ORDER BY id;").fetchall()
+    # Stage 9.2: Ignore missing files that belong to discarded versions.
+    rows = conn.execute(
+        """
+        SELECT f.id
+        FROM file f
+        LEFT JOIN version v ON v.id=f.version_id
+        WHERE UPPER(f.integrity_state)='MISSING'
+          AND (v.is_discarded IS NULL OR v.is_discarded=0)
+        ORDER BY f.id;
+        """
+    ).fetchall()
     return [int(r[0]) for r in rows]
 
 
@@ -134,6 +144,18 @@ def purge_all_missing_file_records(conn: sqlite3.Connection) -> int:
         Number of deleted rows.
     """
     before = conn.total_changes
-    conn.execute("DELETE FROM file WHERE UPPER(integrity_state)='MISSING';")
+    # Stage 9.2: Do not purge missing files under discarded versions.
+    conn.execute(
+        """
+        DELETE FROM file
+        WHERE id IN (
+            SELECT f.id
+            FROM file f
+            LEFT JOIN version v ON v.id=f.version_id
+            WHERE UPPER(f.integrity_state)='MISSING'
+              AND (v.is_discarded IS NULL OR v.is_discarded=0)
+        );
+        """
+    )
     conn.commit()
     return int(conn.total_changes - before)

@@ -16,6 +16,121 @@ from assethub.core.model.asset import Asset
 from assethub.core.model.version import Version
 
 
+def set_version_user_label(
+    conn: sqlite3.Connection, *, version_id: int, user_label: str, commit: bool = True
+) -> None:
+    """Set the optional user-facing label for a version."""
+
+    vid = int(version_id)
+    v = get_version(conn, vid)
+    if v is None:
+        raise ValueError("version not found")
+
+    ulbl = str(user_label or "").strip()
+    conn.execute("UPDATE version SET user_label=? WHERE id=?;", (ulbl, vid))
+    if commit:
+        conn.commit()
+
+    # Best-effort audit log.
+    try:
+        from assethub.core.db.version_membership import write_version_change_log
+
+        write_version_change_log(
+            conn,
+            version_id=vid,
+            action_type="version_set_user_label",
+            summary=f"Set version user label: '{v.label}' → '{ulbl}'" if ulbl else f"Cleared version user label: '{v.label}'",
+            payload={"user_label": ulbl},
+        )
+    except Exception:
+        pass
+
+
+def set_version_discarded(
+    conn: sqlite3.Connection, *, version_id: int, is_discarded: bool, commit: bool = True
+) -> None:
+    """Mark/unmark a version as discarded.
+
+    Discarded versions remain in the DB but are typically hidden in the UI and
+    ignored by missing-file reporting.
+    """
+
+    vid = int(version_id)
+    v = get_version(conn, vid)
+    if v is None:
+        raise ValueError("version not found")
+
+    flag = 1 if bool(is_discarded) else 0
+    conn.execute("UPDATE version SET is_discarded=? WHERE id=?;", (flag, vid))
+    if commit:
+        conn.commit()
+
+    try:
+        from assethub.core.db.version_membership import write_version_change_log
+
+        write_version_change_log(
+            conn,
+            version_id=vid,
+            action_type="version_set_discarded",
+            summary=(
+                f"Marked version discarded: {v.label}" if flag else f"Restored version: {v.label}"
+            ),
+            payload={"is_discarded": flag},
+        )
+    except Exception:
+        pass
+
+
+def set_version_sort_key(
+    conn: sqlite3.Connection, *, version_id: int, sort_key: int, commit: bool = True
+) -> None:
+    """Change a version's sort_key (used as the numeric vNN).
+
+    This updates the vNN label when scheme=='vNN'.
+    """
+
+    vid = int(version_id)
+    new_sk = int(sort_key)
+    if new_sk <= 0:
+        raise ValueError("sort_key must be positive")
+
+    v = get_version(conn, vid)
+    if v is None:
+        raise ValueError("version not found")
+
+    # Prevent collisions within the same asset.
+    row = conn.execute(
+        "SELECT id FROM version WHERE asset_id=? AND sort_key=? AND id<>? LIMIT 1;",
+        (int(v.asset_id), new_sk, vid),
+    ).fetchone()
+    if row is not None:
+        raise ValueError("Another version already uses that version number")
+
+    new_label = v.label
+    if str(v.scheme).strip() == "vNN":
+        new_label = _label_for_scheme(new_sk, v.scheme)
+
+    conn.execute(
+        "UPDATE version SET sort_key=?, label=? WHERE id=?;",
+        (new_sk, str(new_label), vid),
+    )
+    if commit:
+        conn.commit()
+
+    try:
+        from assethub.core.db.version_membership import write_version_change_log
+
+        write_version_change_log(
+            conn,
+            version_id=vid,
+            action_type="version_set_sort_key",
+            summary=f"Changed version number: {v.label} ({v.sort_key}) → {new_label} ({new_sk})",
+            payload={"old_sort_key": int(v.sort_key), "new_sort_key": int(new_sk)},
+        )
+    except Exception:
+        pass
+
+
 def _label_for_scheme(sort_key: int, scheme: str) -> str:
     """Generate a label given a scheme.
 
@@ -34,7 +149,9 @@ def create_version(
     conn: sqlite3.Connection,
     *,
     asset_id: int,
+    sort_key_override: Optional[int] = None,
     label: Optional[str] = None,
+    user_label: Optional[str] = None,
     scheme: str = "vNN",
     commit: bool = True,
 ) -> Version:
@@ -47,22 +164,28 @@ def create_version(
     if aid <= 0:
         raise ValueError("asset_id must be a positive integer")
 
-    row = conn.execute(
-        "SELECT COALESCE(MAX(sort_key), 0) FROM version WHERE asset_id=?;",
-        (aid,),
-    ).fetchone()
-    next_sort = int(row[0] if row and row[0] is not None else 0) + 1
+    if sort_key_override is None:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sort_key), 0) FROM version WHERE asset_id=?;",
+            (aid,),
+        ).fetchone()
+        next_sort = int(row[0] if row and row[0] is not None else 0) + 1
+    else:
+        next_sort = int(sort_key_override)
+        if next_sort <= 0:
+            raise ValueError("sort_key_override must be a positive integer")
 
     lbl = str(label).strip() if label is not None else ""
     if not lbl:
         lbl = _label_for_scheme(next_sort, scheme)
 
+    ulbl = "" if user_label is None else str(user_label).strip()
     conn.execute(
         """
-        INSERT INTO version(asset_id, label, sort_key, scheme)
-        VALUES (?, ?, ?, ?);
+        INSERT INTO version(asset_id, label, sort_key, scheme, is_discarded, user_label)
+        VALUES (?, ?, ?, ?, 0, ?);
         """,
-        (aid, lbl, int(next_sort), str(scheme).strip() or "vNN"),
+        (aid, lbl, int(next_sort), str(scheme).strip() or "vNN", ulbl),
     )
     if commit:
         conn.commit()
@@ -75,7 +198,7 @@ def get_version(conn: sqlite3.Connection, version_id: int) -> Optional[Version]:
     """Fetch a Version by id."""
     row = conn.execute(
         """
-        SELECT id, asset_id, label, sort_key, scheme, created_at, updated_at
+        SELECT id, asset_id, label, sort_key, scheme, is_discarded, user_label, created_at, updated_at
         FROM version
         WHERE id=?
         LIMIT 1;
@@ -90,16 +213,34 @@ def get_version(conn: sqlite3.Connection, version_id: int) -> Optional[Version]:
         label=str(row[2]),
         sort_key=int(row[3]),
         scheme=str(row[4]),
-        created_at=str(row[5]),
-        updated_at=str(row[6]),
+        is_discarded=int(row[5] or 0),
+        user_label=str(row[6] or ""),
+        created_at=str(row[7]),
+        updated_at=str(row[8]),
     )
+
+
+def get_version_by_asset_sort_key(conn: sqlite3.Connection, *, asset_id: int, sort_key: int) -> Optional[Version]:
+    """Fetch a Version by (asset_id, sort_key)."""
+    row = conn.execute(
+        """
+        SELECT id
+        FROM version
+        WHERE asset_id=? AND sort_key=?
+        LIMIT 1;
+        """,
+        (int(asset_id), int(sort_key)),
+    ).fetchone()
+    if row is None:
+        return None
+    return get_version(conn, int(row[0]))
 
 
 def list_versions_for_asset(conn: sqlite3.Connection, asset_id: int) -> List[Version]:
     """List versions for an asset, ordered by sort_key."""
     rows = conn.execute(
         """
-        SELECT id, asset_id, label, sort_key, scheme, created_at, updated_at
+        SELECT id, asset_id, label, sort_key, scheme, is_discarded, user_label, created_at, updated_at
         FROM version
         WHERE asset_id=?
         ORDER BY sort_key;
@@ -116,8 +257,10 @@ def list_versions_for_asset(conn: sqlite3.Connection, asset_id: int) -> List[Ver
                 label=str(r[2]),
                 sort_key=int(r[3]),
                 scheme=str(r[4]),
-                created_at=str(r[5]),
-                updated_at=str(r[6]),
+                is_discarded=int(r[5] or 0),
+                user_label=str(r[6] or ""),
+                created_at=str(r[7]),
+                updated_at=str(r[8]),
             )
         )
     return out
@@ -135,7 +278,7 @@ def resolve_file_to_asset_version(
         """
         SELECT
             a.id, a.storage_id, a.type, a.key, a.name, a.slug, a.created_at, a.updated_at,
-            v.id, v.asset_id, v.label, v.sort_key, v.scheme, v.created_at, v.updated_at
+            v.id, v.asset_id, v.label, v.sort_key, v.scheme, v.is_discarded, v.user_label, v.created_at, v.updated_at
         FROM file f
         JOIN version v ON v.id = f.version_id
         JOIN asset a ON a.id = v.asset_id
@@ -164,7 +307,9 @@ def resolve_file_to_asset_version(
         label=str(row[10]),
         sort_key=int(row[11]),
         scheme=str(row[12]),
-        created_at=str(row[13]),
-        updated_at=str(row[14]),
+        is_discarded=int(row[13] or 0),
+        user_label=str(row[14] or ""),
+        created_at=str(row[15]),
+        updated_at=str(row[16]),
     )
     return asset, version
