@@ -24,7 +24,7 @@ import sqlite3
 from typing import Callable, Dict
 
 
-LATEST_SCHEMA_VERSION = 6
+LATEST_SCHEMA_VERSION = 7
 
 
 def get_schema_version(conn: sqlite3.Connection) -> int:
@@ -131,6 +131,15 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
         FOREIGN KEY(file_id) REFERENCES file(id) ON DELETE CASCADE
     );
 
+    -- Schema v7: manual file -> asset binding (authoritative user intent)
+    CREATE TABLE IF NOT EXISTS file_binding (
+        file_id     INTEGER PRIMARY KEY,
+        asset_id    INTEGER NOT NULL,
+        created_at  TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+        FOREIGN KEY(file_id) REFERENCES file(id) ON DELETE CASCADE,
+        FOREIGN KEY(asset_id) REFERENCES asset(id) ON DELETE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS tag (
         id      INTEGER PRIMARY KEY,
         name    TEXT NOT NULL UNIQUE,
@@ -150,6 +159,7 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
     CREATE INDEX IF NOT EXISTS idx_version_file_version_id ON version_file(version_id);
     CREATE INDEX IF NOT EXISTS idx_version_file_file_id ON version_file(file_id);
     CREATE INDEX IF NOT EXISTS idx_log_version_id ON version_change_log(version_id);
+    CREATE INDEX IF NOT EXISTS idx_file_binding_asset_id ON file_binding(asset_id);
     """
 
     conn.executescript(ddl)
@@ -338,6 +348,36 @@ def _migrate_to_v6(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_version_file_file_id ON version_file(file_id);")
 
     _record_schema_version(conn, 6)
+
+
+def _migrate_to_v7(conn: sqlite3.Connection) -> None:
+    """Migrate to schema v7.
+
+    v7 introduces a manual binding table that records authoritative user intent:
+      - file_binding(file_id PRIMARY KEY, asset_id)
+
+    Constraints:
+      - a file may be bound to at most one asset at a time
+      - binding is asset-level (not version-level)
+
+    Migration is forward-only and idempotent.
+    """
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS file_binding (
+            file_id     INTEGER PRIMARY KEY,
+            asset_id    INTEGER NOT NULL,
+            created_at  TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+            FOREIGN KEY(file_id) REFERENCES file(id) ON DELETE CASCADE,
+            FOREIGN KEY(asset_id) REFERENCES asset(id) ON DELETE CASCADE
+        );
+        """
+    )
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_file_binding_asset_id ON file_binding(asset_id);")
+
+    _record_schema_version(conn, 7)
 
 
 def _ensure_unmanaged_storage_row(conn: sqlite3.Connection) -> int:
@@ -556,4 +596,5 @@ _MIGRATIONS: Dict[int, Callable[[sqlite3.Connection], None]] = {
     4: _migrate_to_v4,
     5: _migrate_to_v5,
     6: _migrate_to_v6,
+    7: _migrate_to_v7,
 }

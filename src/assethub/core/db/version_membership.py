@@ -16,6 +16,8 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from assethub.core.db.file_bindings import ensure_bound_files_in_version
+
 
 def _ph(n: int) -> str:
     """Return a comma-separated placeholder list for SQLite IN clauses."""
@@ -725,6 +727,9 @@ def fork_version(
             # Attach replacements to new (membership table). Ownership enforcement handled above.
             add_files_to_version(conn, version_id=new_vid, file_ids=repl_ids, ignore_duplicates=True)
             added_repl = list(repl_ids)
+
+        # Stage 9.3: carry manual bindings into the newly created snapshot.
+        ensure_bound_files_in_version(conn, asset_id=int(asset_id), version_id=int(new_vid))
 
         # Update convenience pointer for any files newly participating in the forked version.
         all_ids = _norm_ids([*move_ids, *added_repl])

@@ -26,6 +26,7 @@ class DetectionSummary:
     total_considered: int
     skipped_owned: int
     skipped_excluded: int
+    skipped_locked: int = 0
 
 
 @dataclass(frozen=True)
@@ -81,14 +82,17 @@ def detect_proposals_for_storage(
     if sid <= 0:
         raise ValueError("storage_id must be positive")
 
+    # We do not rely on file.version_id for ownership decisions in schema v6+
+    # because membership is represented in version_file.
     rows = conn.execute(
-        "SELECT id, relative_path, version_id, integrity_state FROM file WHERE storage_id=? ORDER BY id ASC;",
+        "SELECT id, relative_path, integrity_state FROM file WHERE storage_id=? ORDER BY id ASC;",
         (sid,),
     ).fetchall()
 
     total_considered = 0
     skipped_owned = 0
     skipped_excluded = 0
+    skipped_locked = 0
 
     img_re = _compile_image_seq_regex(rules.image_sequence_separators, rules.image_sequence_min_digits)
     tex_re = _compile_texture_regex(rules.texture_set_separators, rules.texture_set_channel_tokens)
@@ -110,12 +114,30 @@ def detect_proposals_for_storage(
     tex_groups: Dict[str, List[int]] = {}
     generic_groups: Dict[str, List[int]] = {}
 
+    # Preload binding map so locked files can *inform* detection decisions without
+    # becoming candidates for reassignment.
+    bound_map: Dict[int, int] = {
+        int(r[0]): int(r[1])
+        for r in conn.execute(
+            "SELECT fb.file_id, fb.asset_id FROM file_binding fb JOIN file f ON f.id=fb.file_id WHERE f.storage_id=?;",
+            (sid,),
+        ).fetchall()
+    }
+
     # Pass 1: classify each row deterministically.
-    for file_id, rel_raw, version_id, integrity_state in rows:
+    for file_id, rel_raw, integrity_state in rows:
         total_considered += 1
-        if version_id is not None:
+        fid = int(file_id)
+
+        # Owned = participates in any version snapshot.
+        if conn.execute(
+            "SELECT 1 FROM version_file WHERE file_id=? LIMIT 1;",
+            (fid,),
+        ).fetchone() is not None:
             skipped_owned += 1
             continue
+
+        is_locked = fid in bound_map
 
         rel = _norm_rel(rel_raw)
         d, name = _split_dir_name(rel)
@@ -132,9 +154,23 @@ def detect_proposals_for_storage(
             digits = str(m.group("digits"))
             ext_with_dot = str(m.group("ext"))
             key = f"{d}/{base}{ext_with_dot}" if d else f"{base}{ext_with_dot}"
-            grp = img_groups.setdefault(key, {"base": base, "ext": ext_with_dot, "sep": sep, "digits": digits, "file_ids": []})
-            grp["file_ids"].append(int(file_id))
-            used_file_ids.add(int(file_id))
+            grp = img_groups.setdefault(
+                key,
+                {
+                    "base": base,
+                    "ext": ext_with_dot,
+                    "sep": sep,
+                    "digits": digits,
+                    "file_ids": [],
+                    "all_ids": [],
+                },
+            )
+            grp["all_ids"].append(fid)
+            if not is_locked:
+                grp["file_ids"].append(fid)
+                used_file_ids.add(fid)
+            else:
+                skipped_locked += 1
             continue
 
         # texture_set
@@ -142,16 +178,24 @@ def detect_proposals_for_storage(
         if m2:
             base = strip_version_token(str(m2.group("base")))
             key = f"{d}/{base}" if d else base
-            tex_groups.setdefault(key, []).append(int(file_id))
-            used_file_ids.add(int(file_id))
+            # Locked files contribute to group qualification, but are not candidates.
+            grp = tex_groups.setdefault(key, [])
+            grp.append(fid)
+            if not is_locked:
+                used_file_ids.add(fid)
+            else:
+                skipped_locked += 1
             continue
 
         # generic (fallback)
         stem = re.sub(r"\.[^./\\]+$", "", name)
         stem_clean = strip_version_token(stem)
         key = f"{d}/{stem_clean}" if d else stem_clean
-        generic_groups.setdefault(key, []).append(int(file_id))
-        used_file_ids.add(int(file_id))
+        if not is_locked:
+            generic_groups.setdefault(key, []).append(fid)
+            used_file_ids.add(fid)
+        else:
+            skipped_locked += 1
 
     proposals: List[DetectionProposal] = []
 
@@ -160,22 +204,31 @@ def detect_proposals_for_storage(
         file_ids = sorted(grp["file_ids"])  # type: ignore[arg-type]
         base = str(grp["base"])
         reason = f"image_sequence: sep='{grp['sep']}' digits={len(str(grp['digits']))}"
-        proposals.append(
-            DetectionProposal(
-                type="image_sequence",
-                key=key,
-                suggested_name=base,
-                file_ids=file_ids,
-                reason=reason,
+        # Only emit if at least one member exists (locked members included).
+        all_ids = grp.get("all_ids", [])  # type: ignore[assignment]
+        if all_ids:
+            proposals.append(
+                DetectionProposal(
+                    type="image_sequence",
+                    key=key,
+                    suggested_name=base,
+                    file_ids=file_ids,
+                    reason=reason,
+                )
             )
-        )
 
     # Emit texture sets (only groups >= min_files)
+    #
+    # Note: `tex_groups` includes locked members so they can influence qualification.
+    # The proposal payload lists only *unlocked* candidate ids (those we may attach).
     for key, file_ids in tex_groups.items():
-        if len(file_ids) < rules.texture_set_min_files and key not in existing_tex_keys:
+        locked_count = sum(1 for fid in file_ids if int(fid) in bound_map)
+        candidate_ids = [int(fid) for fid in file_ids if int(fid) not in bound_map]
+
+        if (len(file_ids)) < rules.texture_set_min_files and key not in existing_tex_keys:
             # If it doesn't qualify *and* does not match an existing texture_set asset,
             # demote its members into generic groups deterministically.
-            for fid in file_ids:
+            for fid in candidate_ids:
                 # reconstruct generic key from the file row
                 rel_raw = next(r[1] for r in rows if int(r[0]) == fid)
                 rel = _norm_rel(rel_raw)
@@ -191,7 +244,7 @@ def detect_proposals_for_storage(
                 type="texture_set",
                 key=key,
                 suggested_name=base,
-                file_ids=sorted(file_ids),
+                file_ids=sorted(candidate_ids),
                 reason=(
                     "texture_set: channel tokens"
                     if len(file_ids) >= rules.texture_set_min_files
@@ -224,5 +277,6 @@ def detect_proposals_for_storage(
         total_considered=total_considered,
         skipped_owned=skipped_owned,
         skipped_excluded=skipped_excluded,
+        skipped_locked=skipped_locked,
     )
     return DetectionResult(proposals=proposals, summary=summary)

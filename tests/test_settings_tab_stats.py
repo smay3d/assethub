@@ -59,7 +59,7 @@ def test_settings_snapshot_populates_basic_stats() -> None:
         assert snap.db_stats["unmanaged_present"] in {True, False}
 
         # Schema version should be present.
-        assert snap.about["schema_version"] == "6"
+        assert snap.about["schema_version"] == "7"
 
         # DB should exist on disk.
         assert os.path.exists(db_path)

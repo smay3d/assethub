@@ -19,6 +19,11 @@ import os
 from typing import Any, Dict, List, Sequence, Optional, Tuple
 
 from assethub.core.db.assets import create_asset
+from assethub.core.db.file_bindings import (
+    ensure_bound_files_in_version,
+    get_bindings_for_files,
+    list_bound_file_ids_for_asset,
+)
 from assethub.core.db.versions import create_version, get_version_by_asset_sort_key
 from assethub.core.db.version_membership import attach_files_to_version, write_version_change_log
 from assethub.core.detection.version_parse import parse_version_num, strip_version_token
@@ -82,6 +87,7 @@ class ApplyResult:
     attached_files: int
     skipped_owned: int
     skipped_missing_rows: int
+    skipped_locked: int
     summaries: List[str]
 
 
@@ -238,6 +244,7 @@ def apply_detection_proposals(
     created_versions = 0
     attached_files = 0
     skipped_owned = 0
+    skipped_locked = 0
     skipped_missing = 0
     summaries: List[str] = []
 
@@ -269,6 +276,22 @@ def apply_detection_proposals(
                 name=n,
                 commit=False,
             )
+
+            # Manual bindings are authoritative: skip any file ids that are bound
+            # to a different asset.
+            bind_map = get_bindings_for_files(conn, file_ids=fids)
+            if bind_map:
+                keep: List[int] = []
+                for fid0 in fids:
+                    other_aid = bind_map.get(int(fid0))
+                    if other_aid is None or int(other_aid) == int(asset.id):
+                        keep.append(int(fid0))
+                    else:
+                        skipped_locked += 1
+                fids = keep
+                if not fids:
+                    # Nothing left to apply for this item.
+                    continue
 
             ident = (int(asset.storage_id), str(asset.type), str(asset.key))
             existed_before = ident in existing_asset_keys
@@ -327,6 +350,11 @@ def apply_detection_proposals(
                             [(int(version.id), int(fid0)) for fid0 in base_file_ids],
                         )
 
+                # Stage 9.3: ensure manual bindings are carried into the new snapshot.
+                bound_set = set(list_bound_file_ids_for_asset(conn, asset_id=int(asset.id)))
+                if bound_set:
+                    ensure_bound_files_in_version(conn, asset_id=int(asset.id), version_id=int(version.id))
+
                 # Incoming role map.
                 ph_in = ",".join(["?"] * len(fids))
                 in_rows = conn.execute(
@@ -381,6 +409,9 @@ def apply_detection_proposals(
                         if old_role != role:
                             continue
                         if int(old_fid) == int(new_fid):
+                            continue
+                        # Bound files are never dropped by detection.
+                        if int(old_fid) in bound_set:
                             continue
                         conn.execute(
                             "DELETE FROM version_file WHERE version_id=? AND file_id=?;",
@@ -438,6 +469,7 @@ def apply_detection_proposals(
                     "added_file_ids": attached_unowned_ids,
                     "removed_file_ids": removed_ids,
                     "replaced": replaced,
+                    "skipped_locked": int(skipped_locked),
                 }
 
                 summary = (
@@ -459,6 +491,7 @@ def apply_detection_proposals(
 
             # Default path: create/find the desired version or auto-increment.
             if version is None:
+                created_new_version = False
                 if desired is not None:
                     existing = get_version_by_asset_sort_key(conn, asset_id=int(asset.id), sort_key=int(desired))
                     if existing is not None:
@@ -471,9 +504,15 @@ def apply_detection_proposals(
                             commit=False,
                         )
                         created_versions += 1
+                        created_new_version = True
                 else:
                     version = create_version(conn, asset_id=int(asset.id), commit=False)
                     created_versions += 1
+                    created_new_version = True
+
+                # Stage 9.3: carry manual bindings into any newly created version.
+                if created_new_version:
+                    ensure_bound_files_in_version(conn, asset_id=int(asset.id), version_id=int(version.id))
 
             attach = attach_files_to_version(
                 conn,
@@ -504,6 +543,7 @@ def apply_detection_proposals(
                 "version_id": int(version.id),
                 "added_file_ids": _norm_ids(fids) if attach.attached else [],
                 "skipped_owned": int(attach.skipped_owned),
+                "skipped_locked": int(skipped_locked),
             }
 
             # Best-effort: record only the actually attached file ids (not all candidates).
@@ -537,6 +577,7 @@ def apply_detection_proposals(
         created_versions=created_versions,
         attached_files=attached_files,
         skipped_owned=skipped_owned,
+        skipped_locked=skipped_locked,
         skipped_missing_rows=skipped_missing,
         summaries=summaries,
     )
