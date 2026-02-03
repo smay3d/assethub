@@ -20,12 +20,7 @@ from typing import Any, Dict, List, Sequence, Optional, Tuple
 
 from assethub.core.db.assets import create_asset
 from assethub.core.db.versions import create_version, get_version_by_asset_sort_key
-from assethub.core.db.version_membership import (
-    attach_files_to_version,
-    get_file_ids_for_version,
-    add_files_to_version,
-    write_version_change_log,
-)
+from assethub.core.db.version_membership import attach_files_to_version, write_version_change_log
 from assethub.core.detection.version_parse import parse_version_num, strip_version_token
 
 
@@ -53,9 +48,14 @@ def _role_key_from_relpath(rel: str) -> str:
     that are being replaced by newly detected files. A practical heuristic is to
     compare basenames with the version token removed.
     """
+    # IMPORTANT: Many CG filenames contain dots in the *stem* (e.g. `2.5x2.5`).
+    # Our `strip_version_token()` helper is tolerant of full names with an
+    # extension, but if we pass it a stem (no extension) it may treat the last
+    # dot in the stem as an extension boundary and truncate the key.
+    #
+    # Therefore: pass the full basename (with extension) into `strip_version_token()`.
     base = os.path.basename(str(rel or ""))
-    stem = os.path.splitext(base)[0]
-    return strip_version_token(stem)
+    return strip_version_token(base)
 
 
 @dataclass(frozen=True)
@@ -279,7 +279,7 @@ def apply_detection_proposals(
             desired = item.desired_sort_key
             version = None
 
-            # Stage 9.2.4: Composite assets version-up by cloning the latest non-discarded
+            # Stage 9.2.6: Composite assets version-up by cloning the latest non-discarded
             # version and overriding only the roles present in the incoming set.
             if existed_before and t in {"texture_set", "image_sequence"}:
                 # Determine the latest non-discarded version (base).
@@ -306,31 +306,26 @@ def apply_detection_proposals(
                 )
                 created_versions += 1
 
-                # Stage 9.2.5: Carry-forward MUST be based strictly on the latest
-                # non-discarded version snapshot, not a cross-version heuristic.
-                # This ensures user-controlled edits to the latest snapshot are
-                # respected and not "corrected" by older/higher-token files.
+                # Clone membership from the latest non-discarded version *only*.
+                # This is the locked invariant for composite snapshot carry-forward.
                 base_file_ids: List[int] = []
-                base_by_role: Dict[str, int] = {}
-
                 if base_vid > 0:
-                    base_file_ids = get_file_ids_for_version(conn, int(base_vid))
+                    rows_base = conn.execute(
+                        """
+                        SELECT f.id, f.relative_path
+                        FROM version_file vf
+                        JOIN file f ON f.id=vf.file_id
+                        WHERE vf.version_id=?
+                        ORDER BY f.id ASC;
+                        """,
+                        (int(base_vid),),
+                    ).fetchall()
+                    base_file_ids = [int(r[0]) for r in rows_base]
                     if base_file_ids:
-                        # Clone membership into the new version (snapshot carry-forward).
-                        add_files_to_version(conn, version_id=int(version.id), file_ids=base_file_ids)
-
-                        # Build a role map from the carried-forward files.
-                        ph_base = ",".join(["?"] * len(base_file_ids))
-                        base_rows = conn.execute(
-                            f"SELECT id, relative_path FROM file WHERE id IN ({ph_base});",
-                            tuple(base_file_ids),
-                        ).fetchall()
-                        for fid0, rel0 in base_rows:
-                            role0 = _role_key_from_relpath(str(rel0 or ""))
-                            base_by_role[role0] = int(fid0)
-
-                # Current role map (starts from carried-forward snapshot).
-                cur_by_role: Dict[str, int] = dict(base_by_role)
+                        conn.executemany(
+                            "INSERT OR IGNORE INTO version_file(version_id, file_id) VALUES (?, ?);",
+                            [(int(version.id), int(fid0)) for fid0 in base_file_ids],
+                        )
 
                 # Incoming role map.
                 ph_in = ",".join(["?"] * len(fids))
@@ -363,23 +358,50 @@ def apply_detection_proposals(
                 removed_ids: List[int] = []
                 replaced: List[Dict[str, Any]] = []
 
-                # Override roles in the new version: remove old role member (if any), add incoming.
+                # Override roles in the new version.
+                #
+                # IMPORTANT: we do *not* trust any prebuilt role→file map to remain correct
+                # across varied naming patterns and legacy histories. Instead, for each incoming
+                # role, we inspect the current membership of the *new* version and remove any
+                # members whose role key matches the incoming role key.
                 for role, new_fid in sorted(in_by_role.items()):
-                    old_fid = cur_by_role.get(role)
-                    if old_fid is not None and int(old_fid) != int(new_fid):
+                    cur_rows = conn.execute(
+                        """
+                        SELECT f.id, f.relative_path
+                        FROM version_file vf
+                        JOIN file f ON f.id=vf.file_id
+                        WHERE vf.version_id=?
+                        ORDER BY f.id ASC;
+                        """,
+                        (int(version.id),),
+                    ).fetchall()
+
+                    for old_fid, old_rel in cur_rows:
+                        old_role = _role_key_from_relpath(str(old_rel or ""))
+                        if old_role != role:
+                            continue
+                        if int(old_fid) == int(new_fid):
+                            continue
                         conn.execute(
                             "DELETE FROM version_file WHERE version_id=? AND file_id=?;",
                             (int(version.id), int(old_fid)),
                         )
                         removed_ids.append(int(old_fid))
                         replaced.append({"role": role, "old_file_id": int(old_fid), "new_file_id": int(new_fid)})
+
                     conn.execute(
                         "INSERT OR IGNORE INTO version_file(version_id, file_id) VALUES (?, ?);",
                         (int(version.id), int(new_fid)),
                     )
 
                 # Update convenience pointer for all files participating in the new snapshot.
-                final_ids = sorted(({*base_file_ids, *[int(x) for x in fids]}) - set(removed_ids))
+                final_ids = [
+                    int(r[0])
+                    for r in conn.execute(
+                        "SELECT file_id FROM version_file WHERE version_id=? ORDER BY file_id ASC;",
+                        (int(version.id),),
+                    ).fetchall()
+                ]
                 if final_ids:
                     ph_all = ",".join(["?"] * len(final_ids))
                     conn.execute(
@@ -413,7 +435,6 @@ def apply_detection_proposals(
                     "asset_name": n,
                     "version_id": int(version.id),
                     "source_version_id": int(base_vid),
-                    "carried_forward_file_ids": [int(x) for x in base_file_ids],
                     "added_file_ids": attached_unowned_ids,
                     "removed_file_ids": removed_ids,
                     "replaced": replaced,
@@ -422,8 +443,7 @@ def apply_detection_proposals(
                 summary = (
                     f"Detect apply: asset '{n}' ({t}) → {version.label}; "
                     f"base {('none' if base_vid==0 else 'v'+str(base_sort).zfill(2))}; "
-                    f"carried {len(base_file_ids)} files; "
-                    f"attached {len(attached_unowned_ids)} new files"
+                    f"carried {len(base_file_ids)} files; attached {len(attached_unowned_ids)} new files"
                 )
 
                 write_version_change_log(

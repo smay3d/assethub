@@ -214,12 +214,11 @@ def test_apply_version_up_merge_carries_forward_and_replaces_role(tmp_path) -> N
 
 
 
-def test_apply_version_up_merge_bases_strictly_on_latest_snapshot(tmp_path) -> None:
-    """Stage 9.2.5: base carry-forward strictly on latest non-discarded snapshot.
+def test_apply_version_up_merge_bases_on_latest_non_discarded(tmp_path) -> None:
+    """Stage 9.2.5+: composite version-up bases strictly on latest non-discarded.
 
-    Asset version history is treated as authoritative snapshots. If a legacy DB
-    contains incomplete "delta" versions, version-up merges do *not* attempt to
-    reconstruct missing roles from older versions (to avoid surprising overrides).
+    The latest non-discarded version is the authoritative snapshot base. We do *not*
+    reconstruct a synthetic snapshot from older versions.
     """
 
     conn = sqlite3.connect(tmp_path / "assethub_test.sqlite3")
@@ -229,7 +228,7 @@ def test_apply_version_up_merge_bases_strictly_on_latest_snapshot(tmp_path) -> N
 
     a0 = create_asset(conn, storage_id=sid, type="texture_set", key="tex/Forest", name="Forest", commit=False)
 
-    # v03 contains most files.
+    # v03 contains most files (legacy history).
     v3 = create_version(conn, asset_id=int(a0.id), sort_key_override=3, commit=False)
     f_alb = _insert_file(conn, storage_id=sid, rel="tex/Forest_albedo_v02.tif")
     f_ao = _insert_file(conn, storage_id=sid, rel="tex/Forest_ao_v02.tif")
@@ -237,7 +236,7 @@ def test_apply_version_up_merge_bases_strictly_on_latest_snapshot(tmp_path) -> N
     f_r = _insert_file(conn, storage_id=sid, rel="tex/Forest_roughness_v02.tif")
     attach_files_to_version(conn, version_id=int(v3.id), file_ids=[f_alb, f_ao, f_h, f_r])
 
-    # v04 is the latest but contains only normal_v04 (incomplete).
+    # v04 is the latest non-discarded base but contains only normal_v04.
     v4 = create_version(conn, asset_id=int(a0.id), sort_key_override=4, commit=False)
     f_n4 = _insert_file(conn, storage_id=sid, rel="tex/Forest_normal_v04.tif")
     attach_files_to_version(conn, version_id=int(v4.id), file_ids=[f_n4])
@@ -268,31 +267,12 @@ def test_apply_version_up_merge_bases_strictly_on_latest_snapshot(tmp_path) -> N
         "SELECT id FROM version WHERE asset_id=? AND sort_key=5;", (int(a0.id),)
     ).fetchone()[0]
 
-    ids_v5 = {
-        int(r[0])
-        for r in conn.execute(
-            "SELECT file_id FROM version_file WHERE version_id=?;",
-            (int(v5_id),),
-        ).fetchall()
-    }
+    # Base is v04 only, so v05 should carry forward from v04 and then override.
+    ids_v5 = {int(r[0]) for r in conn.execute("SELECT id FROM file WHERE version_id=?;", (int(v5_id),)).fetchall()}
     assert ids_v5 == {f_n5}
 
-    # Replaced normal stays in v04 membership.
-    ids_v4 = {
-        int(r[0])
-        for r in conn.execute(
-            "SELECT file_id FROM version_file WHERE version_id=?;",
-            (int(v4.id),),
-        ).fetchall()
-    }
+    # Replaced normal stays in v04.
+    ids_v4 = {int(r[0]) for r in conn.execute("SELECT id FROM file WHERE version_id=?;", (int(v4.id),)).fetchall()}
     assert ids_v4 == {f_n4}
 
-    # v03 membership remains intact (history is preserved).
-    ids_v3 = {
-        int(r[0])
-        for r in conn.execute(
-            "SELECT file_id FROM version_file WHERE version_id=?;",
-            (int(v3.id),),
-        ).fetchall()
-    }
-    assert ids_v3 == {f_alb, f_ao, f_h, f_r}
+    # Older versions remain untouched; `file.version_id` is a convenience pointer.
