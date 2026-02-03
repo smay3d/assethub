@@ -20,7 +20,12 @@ from typing import Any, Dict, List, Sequence, Optional, Tuple
 
 from assethub.core.db.assets import create_asset
 from assethub.core.db.versions import create_version, get_version_by_asset_sort_key
-from assethub.core.db.version_membership import attach_files_to_version, write_version_change_log
+from assethub.core.db.version_membership import (
+    attach_files_to_version,
+    get_file_ids_for_version,
+    add_files_to_version,
+    write_version_change_log,
+)
 from assethub.core.detection.version_parse import parse_version_num, strip_version_token
 
 
@@ -301,35 +306,30 @@ def apply_detection_proposals(
                 )
                 created_versions += 1
 
-                # Build a base snapshot selection: latest available file per role
-                # across all active (non-discarded) versions of the asset. This
-                # preserves robustness for legacy/incomplete histories.
-                rows_latest = conn.execute(
-                    """
-                    SELECT f.id, f.relative_path, v.sort_key
-                    FROM version_file vf
-                    JOIN version v ON v.id=vf.version_id
-                    JOIN file f ON f.id=vf.file_id
-                    WHERE v.asset_id=? AND v.is_discarded=0
-                    ORDER BY v.sort_key DESC, f.id DESC;
-                    """,
-                    (int(asset.id),),
-                ).fetchall()
-
+                # Stage 9.2.5: Carry-forward MUST be based strictly on the latest
+                # non-discarded version snapshot, not a cross-version heuristic.
+                # This ensures user-controlled edits to the latest snapshot are
+                # respected and not "corrected" by older/higher-token files.
+                base_file_ids: List[int] = []
                 base_by_role: Dict[str, int] = {}
-                for fid0, rel0, _sk0 in rows_latest:
-                    role0 = _role_key_from_relpath(str(rel0 or ""))
-                    if role0 not in base_by_role:
-                        base_by_role[role0] = int(fid0)
 
-                base_file_ids = list(base_by_role.values())
-                if base_file_ids:
-                    conn.executemany(
-                        "INSERT OR IGNORE INTO version_file(version_id, file_id) VALUES (?, ?);",
-                        [(int(version.id), int(fid0)) for fid0 in base_file_ids],
-                    )
+                if base_vid > 0:
+                    base_file_ids = get_file_ids_for_version(conn, int(base_vid))
+                    if base_file_ids:
+                        # Clone membership into the new version (snapshot carry-forward).
+                        add_files_to_version(conn, version_id=int(version.id), file_ids=base_file_ids)
 
-                # Current role map (starts from base snapshot selection).
+                        # Build a role map from the carried-forward files.
+                        ph_base = ",".join(["?"] * len(base_file_ids))
+                        base_rows = conn.execute(
+                            f"SELECT id, relative_path FROM file WHERE id IN ({ph_base});",
+                            tuple(base_file_ids),
+                        ).fetchall()
+                        for fid0, rel0 in base_rows:
+                            role0 = _role_key_from_relpath(str(rel0 or ""))
+                            base_by_role[role0] = int(fid0)
+
+                # Current role map (starts from carried-forward snapshot).
                 cur_by_role: Dict[str, int] = dict(base_by_role)
 
                 # Incoming role map.
@@ -413,6 +413,7 @@ def apply_detection_proposals(
                     "asset_name": n,
                     "version_id": int(version.id),
                     "source_version_id": int(base_vid),
+                    "carried_forward_file_ids": [int(x) for x in base_file_ids],
                     "added_file_ids": attached_unowned_ids,
                     "removed_file_ids": removed_ids,
                     "replaced": replaced,
@@ -421,6 +422,7 @@ def apply_detection_proposals(
                 summary = (
                     f"Detect apply: asset '{n}' ({t}) → {version.label}; "
                     f"base {('none' if base_vid==0 else 'v'+str(base_sort).zfill(2))}; "
+                    f"carried {len(base_file_ids)} files; "
                     f"attached {len(attached_unowned_ids)} new files"
                 )
 

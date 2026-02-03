@@ -214,12 +214,12 @@ def test_apply_version_up_merge_carries_forward_and_replaces_role(tmp_path) -> N
 
 
 
-def test_apply_version_up_merge_sources_latest_per_role(tmp_path) -> None:
-    """Stage 9.2.3: build new composite version from latest file per role.
+def test_apply_version_up_merge_bases_strictly_on_latest_snapshot(tmp_path) -> None:
+    """Stage 9.2.5: base carry-forward strictly on latest non-discarded snapshot.
 
-    If the latest asset version is incomplete (delta history), the merge should still
-    assemble the new version from the latest available files across the asset's active
-    versions, with incoming files overriding their role.
+    Asset version history is treated as authoritative snapshots. If a legacy DB
+    contains incomplete "delta" versions, version-up merges do *not* attempt to
+    reconstruct missing roles from older versions (to avoid surprising overrides).
     """
 
     conn = sqlite3.connect(tmp_path / "assethub_test.sqlite3")
@@ -268,13 +268,31 @@ def test_apply_version_up_merge_sources_latest_per_role(tmp_path) -> None:
         "SELECT id FROM version WHERE asset_id=? AND sort_key=5;", (int(a0.id),)
     ).fetchone()[0]
 
-    ids_v5 = {int(r[0]) for r in conn.execute("SELECT id FROM file WHERE version_id=?;", (int(v5_id),)).fetchall()}
-    assert ids_v5 == {f_alb, f_ao, f_h, f_r, f_n5}
+    ids_v5 = {
+        int(r[0])
+        for r in conn.execute(
+            "SELECT file_id FROM version_file WHERE version_id=?;",
+            (int(v5_id),),
+        ).fetchall()
+    }
+    assert ids_v5 == {f_n5}
 
-    # Replaced normal stays in v04.
-    ids_v4 = {int(r[0]) for r in conn.execute("SELECT id FROM file WHERE version_id=?;", (int(v4.id),)).fetchall()}
+    # Replaced normal stays in v04 membership.
+    ids_v4 = {
+        int(r[0])
+        for r in conn.execute(
+            "SELECT file_id FROM version_file WHERE version_id=?;",
+            (int(v4.id),),
+        ).fetchall()
+    }
     assert ids_v4 == {f_n4}
 
-    # v03 becomes empty after migration.
-    ids_v3 = {int(r[0]) for r in conn.execute("SELECT id FROM file WHERE version_id=?;", (int(v3.id),)).fetchall()}
-    assert ids_v3 == set()
+    # v03 membership remains intact (history is preserved).
+    ids_v3 = {
+        int(r[0])
+        for r in conn.execute(
+            "SELECT file_id FROM version_file WHERE version_id=?;",
+            (int(v3.id),),
+        ).fetchall()
+    }
+    assert ids_v3 == {f_alb, f_ao, f_h, f_r}
