@@ -413,6 +413,128 @@ Stage 8 introduces asset-level semantics on top of the Stage 7 file-level founda
 ### Stage 8 Plan Document
 - See: **AssetHub_Stage8_Plan_v0.2.md** (detailed sub-stage plan)
 	- Version bump v0.1 -> v0.2: 8.6 repurposed from wrap-up to UI cleanup; wrap-up moved to 8.C.
+
 ---
 
+## Stage 9 — Power-User Asset Organization (In Progress)
+
+Stage 9 re-centers AssetHub from “asset ingest exists” to a **daily-driver organization tool for CG power users**.  
+This stage prioritizes **trustworthy version semantics**, **user authority over detection**, and **scalable organization workflows**.
+
+### Stage 9 Design Doctrine (Clarified)
+
+AssetHub now explicitly distinguishes between:
+
+- **Signals emitted by files** (heuristic, fallible, auto-generated)
+- **Manual user intent** (explicit, authoritative, never auto-changed)
+
+This doctrine governs all Stage 9 systems:
+
+- Auto-detection may change indefinitely as heuristics improve.
+- Manual user actions must **never be undone or altered automatically**.
+- The system must always be explainable in terms of “what signals caused this.”
+
+---
+
+## Version Semantics (Stage 9.2 — Implemented)
+
+### Asset-Centric Versioning Model
+
+- **Asset versions** represent **set snapshots**, not individual file versions.
+- Asset versions are:
+  - **Monotonic** (never decrease or insert below latest)
+  - **Independent of filename version tokens**
+- Filename version tokens are treated as **file metadata only**.
+
+This matches real CG pipeline behavior where:
+- channels version independently
+- assets evolve as sets over time
+
+### Snapshot Carry-Forward (Composite Assets)
+
+For composite asset types (`texture_set`, `image_sequence`):
+
+- Every asset version represents a **complete snapshot**.
+- When a new version is created:
+  - membership is cloned from the **latest non-discarded version**
+  - unchanged files are carried forward
+  - updated files override by role/identity
+- Older versions remain intact and historically accurate.
+
+### Multi-Version Membership
+
+- A single file record may belong to **multiple asset versions**.
+- Snapshot carry-forward does **not** move files out of older versions.
+- Version membership is represented via a join table (`version_file`).
+
+---
+
+## Detection vs Manual Authority (Locked Decision)
+
+### Detection System Role
+
+- Detection answers: **“What signals does this file emit?”**
+- Detection:
+  - is heuristic
+  - may change its conclusions over time
+  - never mutates user decisions
+
+### Manual Override Role (Planned — Stage 9.3)
+
+Manual actions will introduce **authoritative signals**:
+
+- Manual asset–file assignment represents **100% certainty**.
+- Once a file is manually assigned:
+  - detection may not reassign or detach it
+  - detection may still propose updates **within the same asset**
+- Manual assignments are **durable across version increases**:
+  - bound files automatically carry forward into new asset versions
+  - user assigns once; system maintains membership unless explicitly undone
+
+This creates a stable “set-and-forget” workflow for users.
+
+---
+
+## Files View as Assignment Inbox (Planned)
+
+The Files view is evolving toward an **inbox model**:
+
+- Files without an asset assignment are considered **unowned**
+- Files view will eventually default to showing unowned files only
+- Primary user action:
+  - “Assign selected files to asset/version…”
+
+This supports the principle that **every file should ultimately belong to an asset**, either by detection or manual assignment.
+
+---
+
+## Stage 9 Scope Adjustments
+
+### Implemented in Stage 9
+- 9.1 — Asset tagging v1
+- 9.2 — Versioning realism v1
+- 9.2 Extension — Monotonic composite version-up with true snapshot carry-forward
+
+### Deferred / Shelved (Explicit)
+- Checksum reconcile (moved later; requires manual repair tools first)
+- Project detection and association
+- File-level tagging
+- Version snapshot editor UI
+
+These are intentionally deferred to avoid premature complexity.
+
+---
+
+## Current Status
+
+By the end of Stage 9.2.6, AssetHub has:
+
+- Pipeline-believable asset versioning
+- Correct composite snapshot behavior
+- A clear separation between heuristic detection and authoritative user intent
+- A stable foundation for manual asset–file assignment (Stage 9.3)
+
+This concludes the versioning realism phase and prepares the system for user-driven control surfaces.
+
+---
 *This document acts as the authoritative design reference for the project’s current state.*

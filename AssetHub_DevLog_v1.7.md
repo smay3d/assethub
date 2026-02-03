@@ -413,3 +413,100 @@ Stage 8 transitions AssetHub from a file-only browser into an asset-aware system
 
 ### Stage 8 Outcome
 By the end of Stage 8, AssetHub supports asset-aware workflows end-to-end: deterministic detection → review/edit proposals → apply into assets/versions with accountable logging → browse assets and versions in the Library, while preserving the original file-level workflow for debugging and maintenance.
+
+---
+
+## Stage 9 — Power-User Organization (Through 9.2.6)
+
+**Status:** In Progress  
+**Dates:** 2026-01-23 → 2026-02-??  
+**Tests:** Passing (latest: 42 tests, Windows)
+
+Stage 9 shifts AssetHub from basic asset ingest to a **power-user daily-driver**, emphasizing version correctness, organization, and user trust.
+
+---
+
+### Stage 9.1 — Tagging v1 (Completed)
+
+**Reference:** `AssetHub_Stage9_1_TaggingAndTagManager_Plan_v0.1.md`
+
+Delivered:
+- Asset-level tagging system
+- Tag Manager (CRUD only)
+- Semantic tag colors (`#RRGGBB`)
+- Bulk tag add/remove from Library → Assets
+- Tag chips/dots rendering in asset list
+- Stable multi-select behavior and logging
+
+Result:
+- Users can meaningfully organize assets immediately after detection.
+
+---
+
+### Stage 9.2 — Versioning Realism v1 (Completed)
+
+**Reference:**  
+- `AssetHub_Stage9_2_VersioningRealism_Plan_v0.1.md`  
+- `AssetHub_Stage9_2_4_MonotonicAssetVersions_Plan_v0.1.md`  
+- `AssetHub_Stage9_2Ext_VersionUpMerge_Plan_v0.1.md`
+
+#### Core Features Delivered
+- Filename version parsing (`v01`, `_v12`, `version7`, etc.)
+- Version number and label editing
+- Discard / restore versions
+- Discarded versions ignored by health checks
+- Mismatched version detection with **Split vs Force** resolution
+
+#### Composite Asset Fixes (9.2 Extension → 9.2.6)
+Addressed critical pipeline blockers:
+
+1) **Monotonic Asset Versions**
+- Composite assets never create versions below latest.
+- Asset version numbers are independent of file version tokens.
+
+2) **True Snapshot Carry-Forward**
+- New composite versions clone membership from latest non-discarded version.
+- Unchanged files are carried forward.
+- Updated files override by role/identity.
+- Older versions remain intact.
+
+3) **Multi-Version Membership**
+- Introduced `version_file` join table.
+- A file may belong to multiple versions.
+- Snapshot history is preserved.
+
+4) **Edge-Case Robustness**
+- Fixed role detection errors caused by dotted filename stems (e.g. `2.5x2.5`).
+- Eliminated random role drops / duplicate channel issues.
+
+#### Outcome
+After 9.2.6:
+- Asset versions represent real, usable set snapshots.
+- “Latest version” always means “latest complete set.”
+- Version history is trustworthy and pipeline-believable.
+
+---
+
+### Documentation Notes
+
+Stage 9.2 expanded significantly beyond its original outline.  
+Design documentation has been updated to reflect:
+
+- Asset-centric version semantics
+- Detection vs manual authority doctrine
+- Snapshot-based composite versioning
+
+Future Stage 9 plans are adjusted accordingly to avoid documentation drift.
+
+---
+
+### Next Planned Work (Stage 9.3)
+
+Focus shifts to **manual asset–file assignment**:
+
+- User-authored, authoritative file → asset bindings
+- Durable across version increases
+- Detection respects manual ownership
+- Files view evolves toward an “unowned inbox”
+
+Checksum reconcile and project workflows are intentionally deferred until manual repair tools exist.
