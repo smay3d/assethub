@@ -18,7 +18,7 @@ from typing import List, Optional
 
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QMessageBox, QWidget
+from PySide6.QtWidgets import QMessageBox, QWidget, QInputDialog
 
 from assethub.context import AppContext
 from assethub.core.events.event_hub import DbChanged, HealthFinished
@@ -27,10 +27,15 @@ from assethub.core.db.file_records import (
     delete_missing_file_records,
     fetch_file_records,
 )
+from assethub.core.db.asset_library import list_assets
+from assethub.core.db.file_bindings import get_bindings_for_files, bind_files_to_asset, unbind_files
+from assethub.core.db.binding_versioning import version_up_for_binding_change
+
 from assethub.core.health.checker import HealthChecker
 from assethub.core.utils.checksum import sha256_file
 from assethub.ui.utils.clipboard import set_clipboard_text
 from assethub.ui.views.file_detail_pane import compute_absolute_path
+from assethub.ui.dialogs.file_select_dialog import FileChoice, prompt_select_files
 
 
 @dataclass(frozen=True)
@@ -289,6 +294,282 @@ class LibraryActions:
             except Exception:
                 pass
         return deleted
+
+
+    # -----------------
+    # Manual bindings (Stage 9.3)
+    # -----------------
+
+    def prompt_pick_asset(self, *, title: str = "Select Asset", storage_id: Optional[int] = None) -> Optional[int]:
+        """Prompt the user to pick an asset_id.
+
+        Args:
+            title: Dialog title.
+            storage_id: Optional storage filter.
+
+        Returns:
+            asset_id, or None if cancelled.
+        """
+        conn = self.context.db_connection
+        if conn is None:
+            self._warn("Database not available.")
+            return None
+        try:
+            rows = list_assets(conn, storage_id=storage_id) if storage_id is not None else list_assets(conn)
+        except Exception as e:
+            self._warn(f"Failed to load assets: {e}")
+            return None
+
+        if not rows:
+            self._warn("No assets exist yet.")
+            return None
+
+        items: List[str] = []
+        ids: List[int] = []
+        for r in rows:
+            ids.append(int(r.asset_id))
+            name = str(r.name or "")
+            typ = str(r.type or "")
+            key = str(r.key or "")
+            items.append(f"{name}  —  {typ}  —  {key}  (id={int(r.asset_id)})")
+
+        choice, ok = QInputDialog.getItem(self.parent, title, "Choose an asset:", items, 0, False)
+        if not ok:
+            return None
+        try:
+            idx = items.index(str(choice))
+            return int(ids[idx])
+        except Exception:
+            return None
+
+    def prompt_pick_unassigned_files(
+        self,
+        *,
+        title: str = "Select Files",
+        storage_id: Optional[int] = None,
+        limit: int = 2000,
+    ) -> Optional[List[int]]:
+        """Prompt the user to select *unassigned* files.
+
+        Unassigned means:
+          - Not manually bound to any asset, AND
+          - Not participating in any non-discarded version.
+
+        This is a minimal v0 helper (filter + checklist). We intentionally
+        avoid a heavy table UI here.
+        """
+        conn = self.context.db_connection
+        if conn is None:
+            self._warn("Database not available.")
+            return None
+
+        params: List[object] = []
+        where = ""
+        if storage_id is not None:
+            where = "AND f.storage_id=?"
+            params.append(int(storage_id))
+
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    f.id,
+                    s.display_name,
+                    f.relative_path
+                FROM file f
+                JOIN storage s ON s.id=f.storage_id
+                LEFT JOIN file_binding fb ON fb.file_id=f.id
+                WHERE fb.asset_id IS NULL
+                  {where}
+                  AND NOT EXISTS(
+                      SELECT 1
+                      FROM version_file vf
+                      JOIN version v ON v.id=vf.version_id
+                      WHERE vf.file_id=f.id AND COALESCE(v.is_discarded,0)=0
+                  )
+                ORDER BY LOWER(f.relative_path), f.id
+                LIMIT ?;
+                """,
+                (*params, int(limit)),
+            ).fetchall()
+        except Exception as e:
+            self._warn(f"Failed to load files: {e}")
+            return None
+
+        if not rows:
+            self._warn("No unassigned files found.")
+            return None
+
+        choices: List[FileChoice] = []
+        for fid, sname, rel in rows:
+            label = f"{str(rel)}  —  {str(sname)}  (id={int(fid)})"
+            choices.append(FileChoice(file_id=int(fid), label=label))
+
+        return prompt_select_files(parent=self.parent, title=title, files=choices)
+
+    def bind_files_to_asset_with_prompt(
+        self,
+        *,
+        asset_id: int,
+        file_ids: List[int],
+        allow_rebind: bool = True,
+    ) -> int:
+        """Bind file_ids to asset_id, optionally confirming rebinding.
+
+        If allow_rebind is True and some files are already bound to a different asset,
+        the user is prompted to confirm the rebind.
+        """
+        conn = self.context.db_connection
+        if conn is None:
+            return 0
+
+        ids = [int(x) for x in file_ids if int(x) > 0]
+        if not ids:
+            return 0
+
+        target_aid = int(asset_id)
+        bound_map = {}
+        try:
+            bound_map = get_bindings_for_files(conn, file_ids=ids)
+        except Exception:
+            bound_map = {}
+
+        # Only treat as a real operation if at least one selected file would
+        # change binding (unbound -> bound, or bound to other -> rebind).
+        changed_ids = [fid for fid in ids if int(bound_map.get(int(fid), -1)) != int(target_aid)]
+        if not changed_ids:
+            self._log_info("Manual bind: selection already bound to the target asset.")
+            return 0
+
+        conflicts = {fid: aid for fid, aid in bound_map.items() if int(aid) != target_aid}
+        if conflicts and allow_rebind:
+            resp = QMessageBox.question(
+                self.parent,
+                "Rebind files?",
+                f"{len(conflicts)} selected file(s) are already bound to another asset.\n\n"
+                "Rebind them to the new asset?\n\n"
+                "(Files can only be bound to one asset at a time.)",
+            )
+            if resp != QMessageBox.StandardButton.Yes:
+                return 0
+
+        # Version-up semantics: binding changes are asset-level authority.
+        # Any change should create a new version snapshot for the affected assets.
+        affected_old: dict[int, List[int]] = {}
+        for fid, old_aid in conflicts.items():
+            affected_old.setdefault(int(old_aid), []).append(int(fid))
+
+        try:
+            with conn:
+                n = bind_files_to_asset(
+                    conn,
+                    asset_id=target_aid,
+                    file_ids=changed_ids,
+                    allow_rebind=bool(allow_rebind),
+                    commit=False,
+                )
+
+                version_map: dict[int, int] = {}
+
+                # Old assets: remove the moved file(s) from the new snapshot.
+                for old_aid, moved_ids in affected_old.items():
+                    try:
+                        res = version_up_for_binding_change(
+                            conn,
+                            asset_id=int(old_aid),
+                            removed_file_ids=list(moved_ids),
+                            note="rebind: files moved away",
+                        )
+                        version_map[int(old_aid)] = int(res.new_version_id)
+                    except Exception:
+                        continue
+
+                # Target asset: ensure newly bound files are included.
+                try:
+                    res_t = version_up_for_binding_change(
+                        conn,
+                        asset_id=int(target_aid),
+                        removed_file_ids=None,
+                        note="manual bind",
+                    )
+                    version_map[int(target_aid)] = int(res_t.new_version_id)
+                except Exception:
+                    pass
+
+        except Exception as e:
+            self._warn(str(e))
+            return 0
+
+        if n > 0:
+            self._log_info(f"Manual bind: bound {n} file(s) to asset_id={target_aid}.")
+            try:
+                self.context.event_hub.db_changed.emit(
+                    DbChanged(
+                        reason="file_binding_changed",
+                        payload={
+                            "asset_id": target_aid,
+                            "count": int(n),
+                            "affected_assets": sorted({int(target_aid), *list(affected_old.keys())}),
+                        },
+                    )
+                )
+            except Exception:
+                pass
+        return int(n)
+
+    def unbind_files(self, file_ids: List[int]) -> int:
+        """Remove manual bindings for file_ids."""
+        conn = self.context.db_connection
+        if conn is None:
+            return 0
+        ids = [int(x) for x in file_ids if int(x) > 0]
+        if not ids:
+            return 0
+        # Pre-fetch which assets will be affected so we can version-up with removals.
+        pre_map = {}
+        try:
+            pre_map = get_bindings_for_files(conn, file_ids=ids)
+        except Exception:
+            pre_map = {}
+
+        removed_by_asset: dict[int, List[int]] = {}
+        for fid, aid in pre_map.items():
+            removed_by_asset.setdefault(int(aid), []).append(int(fid))
+
+        try:
+            with conn:
+                n = unbind_files(conn, file_ids=ids, commit=False)
+
+                # Version-up any affected assets, removing the unbound file(s) from the new snapshot.
+                for aid, rm_ids in removed_by_asset.items():
+                    try:
+                        version_up_for_binding_change(
+                            conn,
+                            asset_id=int(aid),
+                            removed_file_ids=list(rm_ids),
+                            note="manual unbind",
+                        )
+                    except Exception:
+                        continue
+
+        except Exception as e:
+            self._warn(str(e))
+            return 0
+        if n > 0:
+            self._log_info(f"Manual bind: unbound {n} file(s).")
+            try:
+                self.context.event_hub.db_changed.emit(
+                    DbChanged(
+                        reason="file_binding_changed",
+                        payload={
+                            "count": int(n),
+                            "asset_ids": sorted({int(a) for a in removed_by_asset.keys()}),
+                        },
+                    )
+                )
+            except Exception:
+                pass
+        return int(n)
 
     # -----------------
     # UI helpers

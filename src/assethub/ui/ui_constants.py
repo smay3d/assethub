@@ -12,6 +12,9 @@ LIBRARY_CAP_ROWS: int = 10_000
 # File table default columns (headers)
 DEFAULT_VISIBLE_FILE_COLUMNS: tuple[str, ...] = (
     "Storage",
+    "Bound",
+    "Bound Asset",
+    "Owned by Versions",
     "Filename",
     "Relative Path",
     "Size",

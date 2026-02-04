@@ -295,8 +295,14 @@ class AssetsLibraryWidget(QWidget):
     def refresh(self) -> None:
         """Refresh assets list (and detail panes if selection remains valid)."""
         # Prefer any pending restore request; fall back to current selection.
-        prev_asset = self._pending_restore.asset_id or self._selected.asset_id
-        prev_version = self._pending_restore.version_id or self._selected.version_id
+        # NOTE: we cannot use "or" here because version_id=None is a valid
+        # signal meaning "select latest".
+        if self._pending_restore.asset_id is not None:
+            prev_asset = self._pending_restore.asset_id
+            prev_version = self._pending_restore.version_id
+        else:
+            prev_asset = self._selected.asset_id
+            prev_version = self._selected.version_id
         self._pending_restore = _Selected()
 
         rows = list_assets(self.context.db_connection, storage_id=self._storage_id)
@@ -578,16 +584,17 @@ class AssetsLibraryWidget(QWidget):
     # Context menus
     # -----------------
 
-    def _current_asset_row_data(self) -> Tuple[int, str, str]:
-        """Return (asset_id, name, key) for the current selection."""
+    def _current_asset_row_data(self) -> Tuple[int, int, str, str]:
+        """Return (asset_id, storage_id, name, key) for the current selection."""
         idx = self._assets_view.currentIndex()
         if not idx.isValid():
-            return 0, "", ""
+            return 0, 0, "", ""
         idx0 = self._asset_proxy.index(idx.row(), 0)
         asset_id = int(idx0.data(Qt.ItemDataRole.UserRole) or 0)
+        storage_id = int(idx0.data(Qt.ItemDataRole.UserRole + 1) or 0)
         name = str(self._asset_proxy.index(idx.row(), 0).data() or "")
         key = str(self._asset_proxy.index(idx.row(), 7).data() or "")
-        return asset_id, name, key
+        return asset_id, storage_id, name, key
 
     def _selected_asset_ids(self) -> List[int]:
         sel = self._assets_view.selectionModel()
@@ -744,7 +751,7 @@ class AssetsLibraryWidget(QWidget):
             # selection model without changing selection.
             sel.setCurrentIndex(idx0, QItemSelectionModel.SelectionFlag.NoUpdate)
 
-        asset_id, name, key = self._current_asset_row_data()
+        asset_id, storage_id, name, key = self._current_asset_row_data()
         if asset_id <= 0:
             return
 
@@ -752,6 +759,23 @@ class AssetsLibraryWidget(QWidget):
 
         act_reveal = menu.addAction("Open asset location (reveal in Explorer)")
         act_reveal.triggered.connect(lambda: self._actions.reveal_in_explorer(self._representative_file_id_for_current_asset()))
+
+        act_bind_files = menu.addAction("Bind files to this asset…")
+
+        def _do_bind_files() -> None:
+            # Select from unassigned files (minimal v0). Correctness > UI polish.
+            ids = self._actions.prompt_pick_unassigned_files(
+                title=f"Bind files to: {name}",
+                storage_id=int(storage_id) if int(storage_id) > 0 else None,
+            )
+            if not ids:
+                return
+            self._actions.bind_files_to_asset_with_prompt(asset_id=int(asset_id), file_ids=list(ids), allow_rebind=True)
+            # Show the latest version after the binding-induced version-up.
+            self.set_pending_restore(asset_id=int(asset_id), version_id=None)
+            self.refresh()
+
+        act_bind_files.triggered.connect(_do_bind_files)
 
         menu.addSeparator()
 
@@ -1004,6 +1028,28 @@ class AssetsLibraryWidget(QWidget):
 
         act_health = menu.addAction("Run health check")
         act_health.triggered.connect(lambda: self._actions.run_health_check(selected_ids))
+        menu.addSeparator()
+
+        act_unbind = menu.addAction("Unbind selection from asset")
+        def _do_unbind() -> None:
+            resp = QMessageBox.question(
+                self,
+                "Unbind files?",
+                f"Remove manual bindings for {len(selected_ids)} file(s)?",
+            )
+            if resp != QMessageBox.StandardButton.Yes:
+                return
+            # After unbind, the asset should version-up and drop the file(s) from the latest snapshot.
+            self._actions.unbind_files(list(selected_ids))
+            try:
+                sel = self.get_selection()
+                if sel.asset_id:
+                    self.set_pending_restore(asset_id=int(sel.asset_id), version_id=None)
+                    self.refresh()
+            except Exception:
+                pass
+        act_unbind.triggered.connect(_do_unbind)
+
 
         act_remove = menu.addAction("Remove from database")
         act_remove.setEnabled(all_missing)

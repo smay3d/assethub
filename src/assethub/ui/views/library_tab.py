@@ -72,6 +72,7 @@ class FileFilterProxyModel(QSortFilterProxyModel):
         self._search_text: str = ""
         self._storage_id: Optional[int] = None
         self._integrity: Optional[str] = None
+        self._unassigned_only: bool = False
 
         self.setDynamicSortFilter(True)
         self.setSortRole(Qt.ItemDataRole.UserRole)
@@ -106,6 +107,10 @@ class FileFilterProxyModel(QSortFilterProxyModel):
         self._integrity = integrity
         self._invalidate()
 
+    def set_unassigned_only(self, unassigned_only: bool) -> None:
+        self._unassigned_only = bool(unassigned_only)
+        self._invalidate()
+
     def filterAcceptsRow(self, source_row: int, source_parent) -> bool:  # noqa: N802
         model = self.sourceModel()
         if not isinstance(model, FileTableModel):
@@ -119,6 +124,17 @@ class FileFilterProxyModel(QSortFilterProxyModel):
 
         if self._integrity is not None and str(row.integrity_state).upper() != str(self._integrity).upper():
             return False
+
+
+        if self._unassigned_only:
+            # Unassigned means: not manually bound AND not owned by any non-discarded version.
+            try:
+                if getattr(row, 'bound_asset_id', None) is not None:
+                    return False
+                if int(getattr(row, 'owned_version_count', 0) or 0) > 0:
+                    return False
+            except Exception:
+                pass
 
         if self._search_text:
             hay_a = (row.filename or "").lower()
@@ -234,6 +250,7 @@ class LibraryTab(QWidget):
 
         self.storage_combo = QComboBox(self)
         self.integrity_combo = QComboBox(self)
+        self.chk_unassigned_only = QCheckBox("Unassigned only", self)
         self.chk_show_hidden = QCheckBox("Show hidden columns", self)
         self.btn_refresh = QPushButton("Refresh", self)
 
@@ -243,6 +260,7 @@ class LibraryTab(QWidget):
         top.addWidget(self.storage_combo)
         top.addWidget(QLabel("Integrity:"))
         top.addWidget(self.integrity_combo)
+        top.addWidget(self.chk_unassigned_only)
         top.addWidget(self.chk_show_hidden)
         top.addWidget(self.btn_refresh)
         root.addLayout(top)
@@ -306,6 +324,7 @@ class LibraryTab(QWidget):
 
         self.storage_combo.currentIndexChanged.connect(self._on_storage_filter_changed)
         self.integrity_combo.currentIndexChanged.connect(self._on_integrity_filter_changed)
+        self.chk_unassigned_only.toggled.connect(self._on_unassigned_only_changed)
 
         # Update footer when filters change.
         self.proxy.modelReset.connect(self._update_status_label)
@@ -333,6 +352,12 @@ class LibraryTab(QWidget):
     def _on_show_hidden_changed(self, _checked: bool) -> None:
         self._apply_column_visibility()
 
+    def _on_unassigned_only_changed(self, checked: bool) -> None:
+        if self._mode != "files":
+            return
+        self.proxy.set_unassigned_only(bool(checked))
+        self._update_status_label()
+
     
 
     def _on_mode_changed(self, mode_id: int) -> None:
@@ -354,6 +379,7 @@ class LibraryTab(QWidget):
         # - Show hidden columns toggles internal columns in the active view.
         self.integrity_combo.setEnabled(True)
         self.chk_show_hidden.setEnabled(True)
+        self.chk_unassigned_only.setEnabled(self._mode == "files")
 
         # Refresh current mode
         self.refresh()
@@ -404,9 +430,20 @@ class LibraryTab(QWidget):
                 file.integrity_state,
                 file.size_bytes,
                 file.mtime_unix,
-                file.created_at
+                file.created_at,
+                fb.asset_id AS bound_asset_id,
+                COALESCE(a.name, '') AS bound_asset_name,
+                (
+                    SELECT COUNT(1)
+                    FROM version_file vf
+                    JOIN version v ON v.id=vf.version_id
+                    WHERE vf.file_id=file.id
+                      AND COALESCE(v.is_discarded, 0)=0
+                ) AS owned_version_count
             FROM file
             JOIN storage ON storage.id = file.storage_id
+            LEFT JOIN file_binding fb ON fb.file_id=file.id
+            LEFT JOIN asset a ON a.id=fb.asset_id
             ORDER BY file.id
             LIMIT ?;
             """,
@@ -418,7 +455,20 @@ class LibraryTab(QWidget):
             rows = rows[: self.CAP_ROWS]
 
         file_rows = []
-        for (file_id, version_id, storage_id, storage_name, rel, integrity, size_b, mtime_u, created_at) in rows:
+        for (
+            file_id,
+            version_id,
+            storage_id,
+            storage_name,
+            rel,
+            integrity,
+            size_b,
+            mtime_u,
+            created_at,
+            bound_asset_id,
+            bound_asset_name,
+            owned_version_count,
+        ) in rows:
             rel_s = str(rel)
             filename = rel_s.split("/")[-1] if "/" in rel_s else rel_s
             file_rows.append(
@@ -429,6 +479,9 @@ class LibraryTab(QWidget):
                     storage_name=str(storage_name),
                     relative_path=rel_s,
                     filename=filename,
+                    bound_asset_id=None if bound_asset_id is None else int(bound_asset_id),
+                    bound_asset_name=str(bound_asset_name or ""),
+                    owned_version_count=int(owned_version_count or 0),
                     integrity_state=str(integrity),
                     size_bytes=None if size_b is None else int(size_b),
                     mtime_unix=None if mtime_u is None else float(mtime_u),
@@ -718,6 +771,30 @@ class LibraryTab(QWidget):
 
         act_health = menu.addAction("Run health check")
         act_health.triggered.connect(lambda: self._actions.run_health_check(selected_ids))
+        menu.addSeparator()
+
+        act_bind = menu.addAction("Assign selection to asset…")
+        def _do_bind() -> None:
+            aid = self._actions.prompt_pick_asset(title="Assign files to asset")
+            if aid is None:
+                return
+            self._actions.bind_files_to_asset_with_prompt(asset_id=int(aid), file_ids=list(selected_ids), allow_rebind=True)
+
+        act_bind.triggered.connect(_do_bind)
+
+        act_unbind = menu.addAction("Unbind selection from asset")
+        def _do_unbind() -> None:
+            resp = QMessageBox.question(
+                self,
+                "Unbind files?",
+                f"Remove manual bindings for {len(selected_ids)} file(s)?",
+            )
+            if resp != QMessageBox.StandardButton.Yes:
+                return
+            self._actions.unbind_files(list(selected_ids))
+
+        act_unbind.triggered.connect(_do_unbind)
+
 
         act_remove = menu.addAction("Remove from database")
         act_remove.setEnabled(all_missing)

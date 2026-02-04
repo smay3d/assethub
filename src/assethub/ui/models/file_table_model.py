@@ -28,6 +28,10 @@ class FileRow:
     storage_name: str
     relative_path: str
     filename: str
+    bound_asset_id: Optional[int]
+    bound_asset_name: str
+    owned_version_count: int
+
     integrity_state: str
     size_bytes: Optional[int]
     mtime_unix: Optional[float]
@@ -109,6 +113,30 @@ class FileTableModel(QAbstractTableModel):
                 display=lambda r: r.storage_name,
                 sort_value=lambda r: r.storage_name.lower(),
             ),
+            _Column(
+                key="bound",
+                header="Bound",
+                default_visible=_is_default_visible("Bound"),
+                display=lambda r: "🔒" if (r.bound_asset_id is not None) else "",
+                sort_value=lambda r: 1 if (r.bound_asset_id is not None) else 0,
+            ),
+
+            _Column(
+                key="bound_asset_name",
+                header="Bound Asset",
+                default_visible=_is_default_visible("Bound Asset"),
+                display=lambda r: str(r.bound_asset_name or "") if (r.bound_asset_id is not None) else "",
+                sort_value=lambda r: (str(r.bound_asset_name or "").lower()) if (r.bound_asset_id is not None) else "",
+            ),
+
+            _Column(
+                key="owned_version_count",
+                header="Owned by Versions",
+                default_visible=_is_default_visible("Owned by Versions"),
+                display=lambda r: str(int(r.owned_version_count)) if int(r.owned_version_count) > 0 else "",
+                sort_value=lambda r: int(r.owned_version_count),
+            ),
+
             _Column(
                 key="filename",
                 header="Filename",
@@ -208,11 +236,32 @@ class FileTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.UserRole:
             return col.sort_value(row)
 
-        # Convenience: show relative path as tooltip.
+        # Tooltips
         if role == Qt.ItemDataRole.ToolTipRole:
+            try:
+                if col.key == "bound" and row.bound_asset_id is not None:
+                    nm = str(row.bound_asset_name or "")
+                    aid = int(row.bound_asset_id)
+                    if nm:
+                        return f"Manually bound to: {nm} (asset_id={aid})"
+                    return f"Manually bound (asset_id={aid})"
+                if col.key == "bound_asset_name" and row.bound_asset_id is not None:
+                    nm = str(row.bound_asset_name or "")
+                    aid = int(row.bound_asset_id)
+                    return f"Manually bound to: {nm} (asset_id={aid})"
+                if col.key == "owned_version_count":
+                    n = int(row.owned_version_count)
+                    if n == 1:
+                        return "Participates in 1 non-discarded version"
+                    if n > 1:
+                        return f"Participates in {n} non-discarded versions"
+            except Exception:
+                pass
+            # Default: show relative path.
             return row.relative_path
 
         return None
+
 
     # -----------------
     # Helpers
@@ -237,6 +286,19 @@ class FileTableModel(QAbstractTableModel):
     def file_id_for_row(self, row_index: int) -> Optional[int]:
         row = self.row_data(row_index)
         return None if row is None else int(row.file_id)
+
+    def row_by_file_id(self, file_id: int) -> Optional[int]:
+        """Return the model row index for a file_id, if present."""
+        target = int(file_id)
+        if target <= 0:
+            return None
+        for i, r in enumerate(self._rows):
+            try:
+                if int(r.file_id) == target:
+                    return int(i)
+            except Exception:
+                continue
+        return None
 
     @property
     def truncated(self) -> bool:
