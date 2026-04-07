@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C \"//pyc-yui/scott/Art/Scripts/AssetHubProject/AssetHub\" log --oneline -5)",
+      "Bash(git -C \"//pyc-yui/scott/Art/Scripts/AssetHubProject/AssetHub\" status)",
+      "Bash(git -C \"//pyc-yui/scott/Art/Scripts/AssetHubProject/AssetHub\" branch -a)",
+      "Bash(git -C \"//pyc-yui/scott/Art/Scripts/AssetHubProject/AssetHub\" diff --cached)"
+    ]
+  }
+}
