@@ -4,7 +4,16 @@
       "Bash(git -C \"//pyc-yui/scott/Art/Scripts/AssetHubProject/AssetHub\" log --oneline -5)",
       "Bash(git -C \"//pyc-yui/scott/Art/Scripts/AssetHubProject/AssetHub\" status)",
       "Bash(git -C \"//pyc-yui/scott/Art/Scripts/AssetHubProject/AssetHub\" branch -a)",
-      "Bash(git -C \"//pyc-yui/scott/Art/Scripts/AssetHubProject/AssetHub\" diff --cached)"
+      "Bash(git -C \"//pyc-yui/scott/Art/Scripts/AssetHubProject/AssetHub\" diff --cached)",
+      "Bash(git:*)",
+      "Bash(python -m pytest --collect-only)",
+      "Bash(python -m pytest -xvs)",
+      "Bash(wc -l src/assethub/core/db/*.py)",
+      "Bash(xargs wc:*)",
+      "Bash(where python:*)",
+      "Bash(pip list:*)",
+      "Bash(pip3 list:*)",
+      "Bash(py:*)"
     ]
   }
 }

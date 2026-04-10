@@ -38,6 +38,19 @@ def run_app() -> None:
     """
     app = _ensure_qt_application()
 
+    # QSettings relies on org/app name being set before first use.
+    app.setOrganizationName("AssetHub")
+    app.setApplicationName("AssetHub")
+
+    # Fusion gives consistent cross-platform appearance and works well with
+    # custom palettes (required for reliable dark mode).
+    app.setStyle("Fusion")
+
+    # Apply QSS and saved theme (dark/light) before any widgets are created.
+    from assethub.ui.style.qss import _APP_QSS, apply_theme, is_dark_mode_enabled  # noqa: PLC0415
+    app.setStyleSheet(_APP_QSS)
+    apply_theme(is_dark_mode_enabled())
+
     config = load_app_config()
     context = AppContext(config=config)
     context.initialize_core_services()

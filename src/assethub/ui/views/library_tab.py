@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMenu,
@@ -284,7 +285,18 @@ class LibraryTab(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         # Stage 7.5.2: standard desktop multi-select
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setAlternatingRowColors(True)
+
+        # Row height: slightly taller than default for readability.
+        vh = self.table.verticalHeader()
+        vh.hide()
+        vh.setDefaultSectionSize(26)
+
+        hh = self.table.horizontalHeader()
+        hh.setStretchLastSection(True)
+        hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        hh.setMinimumSectionSize(60)
+
         left_layout.addWidget(self.table, stretch=1)
 
         # Footer (belongs with the table)

@@ -11,6 +11,7 @@ from typing import Optional
 from PySide6.QtCore import Qt, QSettings, QUrl
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
 from assethub import __version__
 from assethub.context import AppContext
 from assethub.core.events.event_hub import DbChanged, ScanFinished, HealthFinished
+from assethub.ui.style.qss import is_dark_mode_enabled, set_dark_mode
 from assethub.ui.ui_constants import (
     DEFAULT_VISIBLE_FILE_COLUMNS,
     LIBRARY_CAP_ROWS,
@@ -253,6 +255,12 @@ class SettingsTab(QWidget):
         self.grp_ui = QGroupBox("UI Behavior", body)
         ui_form = QFormLayout(self.grp_ui)
 
+        # Dark mode toggle
+        self.chk_dark_mode = QCheckBox("Dark mode", self.grp_ui)
+        self.chk_dark_mode.setChecked(is_dark_mode_enabled())
+        self.chk_dark_mode.toggled.connect(self._on_dark_mode_toggled)
+        ui_form.addRow("Theme:", self.chk_dark_mode)
+
         self.lbl_row_cap = QLabel("", self.grp_ui)
         self.lbl_default_cols = QLabel("", self.grp_ui)
         self.lbl_preview_formats = QLabel("", self.grp_ui)
@@ -409,6 +417,9 @@ class SettingsTab(QWidget):
     # -----------------
     # Actions
     # -----------------
+
+    def _on_dark_mode_toggled(self, checked: bool) -> None:
+        set_dark_mode(bool(checked))
 
     def _get_path_value(self, key: str) -> str:
         cfg = self.context.config

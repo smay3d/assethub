@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Callable, List, Optional
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtGui import QColor
 
 from assethub.ui.ui_constants import DEFAULT_VISIBLE_FILE_COLUMNS
 
@@ -235,6 +236,16 @@ class FileTableModel(QAbstractTableModel):
 
         if role == Qt.ItemDataRole.UserRole:
             return col.sort_value(row)
+
+        # Integrity state: color the text to make status immediately scannable.
+        if role == Qt.ItemDataRole.ForegroundRole:
+            if col.key == "integrity_state":
+                state = str(row.integrity_state).upper()
+                if state == "MISSING":
+                    return QColor(200, 70, 60)    # red
+                if state == "UNRESOLVED":
+                    return QColor(200, 140, 40)   # amber
+            return None
 
         # Tooltips
         if role == Qt.ItemDataRole.ToolTipRole:

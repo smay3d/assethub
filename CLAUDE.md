@@ -74,6 +74,6 @@ Background operations (scan, health check) are cancellable via `threading.Event`
 
 Authoritative design decisions and implementation stage tracking live in:
 - `AssetHub_DesignSummary_v1.9.md` — architecture decisions and rationale
-- `AssetHub_DevLog_v1.7.md` — stage-by-stage implementation log (Stages 5–9+)
+- `AssetHub_DevLog_v1.8.md` — stage-by-stage implementation log (Stages 5–9+)
 
 Consult these before making structural changes.
