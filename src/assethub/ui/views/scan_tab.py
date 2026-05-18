@@ -356,6 +356,7 @@ class ScanTab(QWidget):
             return
         dlg = EditRootDialog(conn, root, parent=self)
         if dlg.exec() == EditRootDialog.DialogCode.Accepted:
+            self.refresh_roots()
             self.context.event_hub.db_changed.emit(
                 DbChanged(
                     reason="scan_exclusions_updated",
