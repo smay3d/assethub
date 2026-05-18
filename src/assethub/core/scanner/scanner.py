@@ -73,7 +73,7 @@ class Scanner:
                         return ScanResult(discovered_paths=discovered, files_indexed=indexed, canceled=True)
                     # Skip files whose extension is excluded for this root.
                     ext = os.path.splitext(fname)[1].lstrip(".").lower()
-                    if ext in exclusions.get(root.id, frozenset()):
+                    if ext and ext in exclusions.get(root.id, frozenset()):
                         continue
                     abs_path = os.path.join(dirpath, fname)
 

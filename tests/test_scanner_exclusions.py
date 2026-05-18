@@ -71,17 +71,18 @@ def test_exclusions_are_per_root(tmp_path: Path) -> None:
     (root_b / "file.log").write_text("data")
 
     sid_a = _mk_root(conn, root_a)
-    _mk_root(conn, root_b)
+    sid_b = _mk_root(conn, root_b)
     add_exclusion(conn, sid_a, "log")  # only root_a excludes log
 
     scanner = Scanner(conn, StorageManager(conn))
     scanner.scan_all()
 
     # root_b's file.log should be indexed (same relative_path, different storage_id)
-    row = conn.execute(
-        "SELECT COUNT(*) FROM file WHERE relative_path='file.log';"
-    ).fetchone()
-    assert int(row[0]) == 1  # only root_b's copy
+    rows = conn.execute(
+        "SELECT storage_id FROM file WHERE relative_path='file.log';"
+    ).fetchall()
+    assert len(rows) == 1, "expected exactly one file.log row (root_b only)"
+    assert rows[0][0] == sid_b, "surviving file.log must belong to root_b, not root_a"
 
 
 def test_already_indexed_files_remain_after_exclusion_added(tmp_path: Path) -> None:
