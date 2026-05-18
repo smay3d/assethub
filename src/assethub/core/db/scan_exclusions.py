@@ -67,7 +67,7 @@ def set_exclusions(
     Normalizes all extensions before inserting. Duplicates in input are ignored.
     """
     sid = int(storage_id)
-    normalized = {_normalize(e) for e in extensions if _normalize(e)}
+    normalized = {n for e in extensions if (n := _normalize(e))}
     conn.execute(
         "DELETE FROM storage_scan_exclusion WHERE storage_id=?;",
         (sid,),
