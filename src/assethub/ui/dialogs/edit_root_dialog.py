@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -36,7 +35,7 @@ class EditRootDialog(QDialog):
         self,
         conn: sqlite3.Connection,
         root: StorageRoot,
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._conn = conn
@@ -90,7 +89,8 @@ class EditRootDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.accepted.connect(self._on_save)
+        save_btn = buttons.button(QDialogButtonBox.StandardButton.Save)
+        save_btn.clicked.connect(self._on_save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
@@ -118,13 +118,16 @@ class EditRootDialog(QDialog):
         # Support comma-separated input
         parts = [p.strip().lstrip(".").lower() for p in raw.split(",") if p.strip()]
         existing = set(self._current_extensions())
+        added = False
         for ext in parts:
             if not ext:
                 continue
             if ext not in existing:
                 self._list.addItem(QListWidgetItem(ext))
                 existing.add(ext)
-        self._input.clear()
+                added = True
+        if added:
+            self._input.clear()
 
     def _on_remove_selected(self) -> None:
         for item in self._list.selectedItems():
