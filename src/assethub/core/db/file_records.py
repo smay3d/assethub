@@ -26,6 +26,126 @@ class FileRecordInfo:
     size_bytes: Optional[int]
 
 
+@dataclass(frozen=True)
+class LibraryFileRow:
+    file_id: int
+    version_id: Optional[int]
+    storage_id: int
+    storage_name: str
+    relative_path: str
+    integrity_state: str
+    size_bytes: Optional[int]
+    mtime_unix: Optional[float]
+    created_at: str
+    bound_asset_id: Optional[int]
+    bound_asset_name: str
+    owned_version_count: int
+
+
+@dataclass(frozen=True)
+class LibraryQueryResult:
+    rows: List[LibraryFileRow]
+    total_in_db: int
+    truncated: bool
+
+
+_LIBRARY_FILE_SELECT = """
+    SELECT
+        file.id,
+        file.version_id,
+        file.storage_id,
+        COALESCE(NULLIF(storage.display_name, ''), storage.name) AS storage_label,
+        file.relative_path,
+        file.integrity_state,
+        file.size_bytes,
+        file.mtime_unix,
+        file.created_at,
+        fb.asset_id AS bound_asset_id,
+        COALESCE(a.name, '') AS bound_asset_name,
+        (
+            SELECT COUNT(1)
+            FROM version_file vf
+            JOIN version v ON v.id = vf.version_id
+            WHERE vf.file_id = file.id
+              AND COALESCE(v.is_discarded, 0) = 0
+        ) AS owned_version_count
+    FROM file
+    JOIN storage ON storage.id = file.storage_id
+    LEFT JOIN file_binding fb ON fb.file_id = file.id
+    LEFT JOIN asset a ON a.id = fb.asset_id
+"""
+
+
+def _build_library_row(raw: tuple) -> LibraryFileRow:
+    (
+        file_id, version_id, storage_id, storage_name,
+        rel, integrity, size_b, mtime_u, created_at,
+        bound_asset_id, bound_asset_name, owned_version_count,
+    ) = raw
+    return LibraryFileRow(
+        file_id=int(file_id),
+        version_id=None if version_id is None else int(version_id),
+        storage_id=int(storage_id),
+        storage_name=str(storage_name),
+        relative_path=str(rel),
+        integrity_state=str(integrity),
+        size_bytes=None if size_b is None else int(size_b),
+        mtime_unix=None if mtime_u is None else float(mtime_u),
+        created_at=str(created_at),
+        bound_asset_id=None if bound_asset_id is None else int(bound_asset_id),
+        bound_asset_name=str(bound_asset_name or ""),
+        owned_version_count=int(owned_version_count or 0),
+    )
+
+
+def query_library_files(
+    conn: sqlite3.Connection,
+    *,
+    search_text: str = "",
+    limit: int = 10_000,
+) -> LibraryQueryResult:
+    """Query file records for the Library tab with optional server-side search.
+
+    Search is applied in SQL (LIKE on relative_path), so files beyond ``limit``
+    are reachable when a search term is active — the LIMIT applies after filtering.
+
+    Args:
+        conn: SQLite connection with an initialized schema.
+        search_text: Case-insensitive substring to match against relative_path.
+            Empty string returns all files (up to limit).
+        limit: Maximum number of rows to return. One extra row is fetched to
+            detect truncation without a separate COUNT query on the full result.
+
+    Returns:
+        LibraryQueryResult with rows, total_in_db (unfiltered count), and
+        a truncated flag indicating whether results were capped.
+    """
+    total_row = conn.execute("SELECT COUNT(*) FROM file;").fetchone()
+    total_in_db = int(total_row[0]) if total_row else 0
+
+    term = (search_text or "").strip()
+    if term:
+        pattern = f"%{term}%"
+        raw_rows = conn.execute(
+            _LIBRARY_FILE_SELECT
+            + " WHERE file.relative_path LIKE ? COLLATE NOCASE"
+            + " ORDER BY file.id LIMIT ?;",
+            (pattern, limit + 1),
+        ).fetchall()
+    else:
+        raw_rows = conn.execute(
+            _LIBRARY_FILE_SELECT + " ORDER BY file.id LIMIT ?;",
+            (limit + 1,),
+        ).fetchall()
+
+    truncated = len(raw_rows) > limit
+    if truncated:
+        raw_rows = raw_rows[:limit]
+
+    rows = [_build_library_row(r) for r in raw_rows]
+    return LibraryQueryResult(rows=rows, total_in_db=total_in_db, truncated=truncated)
+
+
 def _placeholders(n: int) -> str:
     return ",".join(["?"] * n)
 

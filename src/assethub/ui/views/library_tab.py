@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 
 from assethub.context import AppContext
 from assethub.core.db.schema import initialize_schema
+from assethub.core.db.file_records import query_library_files
 from assethub.ui.models.file_table_model import FileRow, FileTableModel
 from assethub.ui.ui_constants import LIBRARY_CAP_ROWS
 from assethub.ui.views.file_detail_pane import FileDetailPane, compute_absolute_path
@@ -358,8 +359,8 @@ class LibraryTab(QWidget):
         if self._mode == "assets":
             self.assets_widget.set_search_text(text)
             return
-        self.proxy.set_search_text(text)
-        self._update_status_label()
+        # Search is server-side: refresh queries the DB with the new term.
+        self.refresh()
 
     def _on_show_hidden_changed(self, _checked: bool) -> None:
         self._apply_column_visibility()
@@ -425,79 +426,30 @@ class LibraryTab(QWidget):
         prev_selected_ids = list(self._selected_file_ids)
         prev_current_id = self._current_file_id
 
-        # Count total rows first (for footer).
-        total_row = conn.execute("SELECT COUNT(*) FROM file;").fetchone()
-        total_in_db = int(total_row[0]) if total_row else 0
-
-        # Load a capped number of rows; fetch one extra to detect truncation.
-        limit = self.CAP_ROWS + 1
-        rows = conn.execute(
-            """
-            SELECT
-                file.id,
-                file.version_id,
-                file.storage_id,
-                COALESCE(NULLIF(storage.display_name, ''), storage.name) AS storage_label,
-                file.relative_path,
-                file.integrity_state,
-                file.size_bytes,
-                file.mtime_unix,
-                file.created_at,
-                fb.asset_id AS bound_asset_id,
-                COALESCE(a.name, '') AS bound_asset_name,
-                (
-                    SELECT COUNT(1)
-                    FROM version_file vf
-                    JOIN version v ON v.id=vf.version_id
-                    WHERE vf.file_id=file.id
-                      AND COALESCE(v.is_discarded, 0)=0
-                ) AS owned_version_count
-            FROM file
-            JOIN storage ON storage.id = file.storage_id
-            LEFT JOIN file_binding fb ON fb.file_id=file.id
-            LEFT JOIN asset a ON a.id=fb.asset_id
-            ORDER BY file.id
-            LIMIT ?;
-            """,
-            (limit,),
-        ).fetchall()
-
-        truncated = len(rows) > self.CAP_ROWS
-        if truncated:
-            rows = rows[: self.CAP_ROWS]
+        search_text = self.search_edit.text()
+        result = query_library_files(conn, search_text=search_text, limit=self.CAP_ROWS)
+        total_in_db = result.total_in_db
+        truncated = result.truncated
 
         file_rows = []
-        for (
-            file_id,
-            version_id,
-            storage_id,
-            storage_name,
-            rel,
-            integrity,
-            size_b,
-            mtime_u,
-            created_at,
-            bound_asset_id,
-            bound_asset_name,
-            owned_version_count,
-        ) in rows:
-            rel_s = str(rel)
+        for r in result.rows:
+            rel_s = r.relative_path
             filename = rel_s.split("/")[-1] if "/" in rel_s else rel_s
             file_rows.append(
                 FileRow(
-                    file_id=int(file_id),
-                    storage_id=int(storage_id),
-                    version_id=None if version_id is None else int(version_id),
-                    storage_name=str(storage_name),
+                    file_id=r.file_id,
+                    storage_id=r.storage_id,
+                    version_id=r.version_id,
+                    storage_name=r.storage_name,
                     relative_path=rel_s,
                     filename=filename,
-                    bound_asset_id=None if bound_asset_id is None else int(bound_asset_id),
-                    bound_asset_name=str(bound_asset_name or ""),
-                    owned_version_count=int(owned_version_count or 0),
-                    integrity_state=str(integrity),
-                    size_bytes=None if size_b is None else int(size_b),
-                    mtime_unix=None if mtime_u is None else float(mtime_u),
-                    created_at=str(created_at),
+                    bound_asset_id=r.bound_asset_id,
+                    bound_asset_name=r.bound_asset_name,
+                    owned_version_count=r.owned_version_count,
+                    integrity_state=r.integrity_state,
+                    size_bytes=r.size_bytes,
+                    mtime_unix=r.mtime_unix,
+                    created_at=r.created_at,
                 )
             )
 
