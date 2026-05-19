@@ -24,7 +24,7 @@ import sqlite3
 from typing import Callable, Dict
 
 
-LATEST_SCHEMA_VERSION = 7
+LATEST_SCHEMA_VERSION = 8
 
 
 def get_schema_version(conn: sqlite3.Connection) -> int:
@@ -139,6 +139,15 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
         FOREIGN KEY(file_id) REFERENCES file(id) ON DELETE CASCADE,
         FOREIGN KEY(asset_id) REFERENCES asset(id) ON DELETE CASCADE
     );
+
+    -- Schema v8: per-root scan exclusions
+    CREATE TABLE IF NOT EXISTS storage_scan_exclusion (
+        id          INTEGER PRIMARY KEY,
+        storage_id  INTEGER NOT NULL REFERENCES storage(id) ON DELETE CASCADE,
+        extension   TEXT NOT NULL,
+        UNIQUE(storage_id, extension)
+    );
+    CREATE INDEX IF NOT EXISTS idx_scan_exclusion_storage ON storage_scan_exclusion(storage_id);
 
     CREATE TABLE IF NOT EXISTS tag (
         id      INTEGER PRIMARY KEY,
@@ -590,6 +599,30 @@ def _ensure_file_updated_at(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_v8(conn: sqlite3.Connection) -> None:
+    """Migrate to schema v8.
+
+    v8 adds per-root scan exclusions:
+      - storage_scan_exclusion(storage_id, extension)
+
+    Migration is forward-only and idempotent.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS storage_scan_exclusion (
+            id          INTEGER PRIMARY KEY,
+            storage_id  INTEGER NOT NULL REFERENCES storage(id) ON DELETE CASCADE,
+            extension   TEXT NOT NULL,
+            UNIQUE(storage_id, extension)
+        );
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scan_exclusion_storage ON storage_scan_exclusion(storage_id);"
+    )
+    _record_schema_version(conn, 8)
+
+
 _MIGRATIONS: Dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_to_v2,
     3: _migrate_to_v3,
@@ -597,4 +630,5 @@ _MIGRATIONS: Dict[int, Callable[[sqlite3.Connection], None]] = {
     5: _migrate_to_v5,
     6: _migrate_to_v6,
     7: _migrate_to_v7,
+    8: _migrate_to_v8,
 }

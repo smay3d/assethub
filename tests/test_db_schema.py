@@ -32,6 +32,7 @@ def test_initialize_schema_creates_tables(tmp_path) -> None:
     assert "file" in tables
     assert "tag" in tables
     assert "asset_tag" in tables
+    assert "storage_scan_exclusion" in tables  # v8
 
     # Schema bookkeeping
     assert "schema_version" in tables
@@ -46,7 +47,7 @@ def test_initialize_schema_is_idempotent(tmp_path) -> None:
 
     row = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()
     assert row is not None
-    assert row[0] == 7
+    assert row[0] == 8
 
 
 def test_initialize_schema_migrates_v1_to_latest(tmp_path) -> None:
@@ -108,7 +109,7 @@ def test_initialize_schema_migrates_v1_to_latest(tmp_path) -> None:
 
     row = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()
     assert row is not None
-    assert row[0] == 7
+    assert row[0] == 8
 
 
 def test_initialize_schema_migrates_v2_to_latest_and_preserves_ids(tmp_path) -> None:
@@ -206,7 +207,7 @@ def test_initialize_schema_migrates_v2_to_latest_and_preserves_ids(tmp_path) -> 
     # v6 bookkeeping.
     row = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()
     assert row is not None
-    assert row[0] == 7
+    assert row[0] == 8
 
     # v6: membership join table should be backfilled from legacy file.version_id.
     row = conn.execute(
@@ -242,4 +243,4 @@ def test_initialize_schema_migrates_v3_to_v4_adds_tag_color(tmp_path) -> None:
     assert "color" in tag_cols
     row = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()
     assert row is not None
-    assert row[0] == 7
+    assert row[0] == 8

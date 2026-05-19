@@ -7,6 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
+from assethub.core.db.scan_exclusions import get_exclusions
 from assethub.core.storage.roots import StorageManager, StorageRoot
 
 
@@ -39,6 +40,12 @@ class Scanner:
         discovered: List[str] = []
         indexed = 0
 
+        # Load exclusion sets for all roots before walking.
+        exclusions: dict[int, frozenset[str]] = {
+            root.id: get_exclusions(self._conn, root.id)
+            for root in roots
+        }
+
         def _should_cancel() -> bool:
             if cancel_check is None:
                 return False
@@ -64,6 +71,10 @@ class Scanner:
                     if _should_cancel():
                         self._conn.commit()
                         return ScanResult(discovered_paths=discovered, files_indexed=indexed, canceled=True)
+                    # Skip files whose extension is excluded for this root.
+                    ext = os.path.splitext(fname)[1].lstrip(".").lower()
+                    if ext and ext in exclusions.get(root.id, frozenset()):
+                        continue
                     abs_path = os.path.join(dirpath, fname)
 
                     # Best-effort: skip if file vanished mid-walk.

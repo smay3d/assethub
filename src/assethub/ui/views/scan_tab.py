@@ -41,6 +41,7 @@ from assethub.core.detection.apply import (
     VersionConflict,
 )
 from assethub.ui.dialogs.detect_assets_dialog import DetectAssetsDialog
+from assethub.ui.dialogs.edit_root_dialog import EditRootDialog
 from assethub.ui.dialogs.version_conflict_dialog import VersionConflictDialog
 
 
@@ -136,9 +137,12 @@ class ScanTab(QWidget):
         roots_btn_row = QHBoxLayout()
         self.btn_add_root = QPushButton("Add Root…")
         self.btn_remove_root = QPushButton("Remove Root")
+        self.btn_edit_root = QPushButton("Edit…")
         self.btn_add_root.clicked.connect(self._on_add_root)
         self.btn_remove_root.clicked.connect(self._on_remove_root)
+        self.btn_edit_root.clicked.connect(self._on_edit_root)
         roots_btn_row.addWidget(self.btn_add_root)
+        roots_btn_row.addWidget(self.btn_edit_root)
         roots_btn_row.addWidget(self.btn_remove_root)
         roots_btn_row.addStretch(1)
         root_layout.addLayout(roots_btn_row)
@@ -337,6 +341,28 @@ class ScanTab(QWidget):
         self.context.event_hub.db_changed.emit(
             DbChanged(reason="storage_root_unregistered", payload={"storage_id": int(storage_id)})
         )
+
+    @Slot()
+    def _on_edit_root(self) -> None:
+        root = self._get_selected_storage_root()
+        if root is None:
+            QMessageBox.information(self, "AssetHub", "Select a storage root to edit.")
+            return
+        if root.root_path is None or str(root.status).upper() == StorageManager.UNMANAGED_STATUS:
+            QMessageBox.information(self, "AssetHub", "Cannot edit the Unmanaged storage root.")
+            return
+        conn = self.context.db_connection
+        if conn is None:
+            return
+        dlg = EditRootDialog(conn, root, parent=self)
+        if dlg.exec() == EditRootDialog.DialogCode.Accepted:
+            self.refresh_roots()
+            self.context.event_hub.db_changed.emit(
+                DbChanged(
+                    reason="scan_exclusions_updated",
+                    payload={"storage_id": int(root.id)},
+                )
+            )
 
     @Slot()
     def _on_scan(self) -> None:
@@ -590,14 +616,16 @@ class ScanTab(QWidget):
         """Enable/disable UI actions based on selection and busy state."""
         if self._current_job is not None:
             self.btn_detect_assets.setEnabled(False)
+            self.btn_edit_root.setEnabled(False)
             return
         root = self._get_selected_storage_root()
-        enable_detect = bool(
+        is_managed = bool(
             root is not None
             and root.root_path is not None
             and str(root.status).upper() != StorageManager.UNMANAGED_STATUS
         )
-        self.btn_detect_assets.setEnabled(enable_detect)
+        self.btn_detect_assets.setEnabled(is_managed)
+        self.btn_edit_root.setEnabled(is_managed)
 
     # -------------------------
     # Job control
@@ -706,6 +734,7 @@ class ScanTab(QWidget):
     def _set_busy(self, busy: bool) -> None:
         self.btn_add_root.setEnabled(not busy)
         self.btn_remove_root.setEnabled(not busy)
+        self.btn_edit_root.setEnabled(False if busy else self.btn_edit_root.isEnabled())
         self.btn_scan.setEnabled(not busy)
         self.btn_health.setEnabled(not busy)
         self.btn_detect_assets.setEnabled(False if busy else self.btn_detect_assets.isEnabled())
@@ -798,11 +827,13 @@ class ScanTab(QWidget):
 
             menu = QMenu(self)
 
+            act_edit = menu.addAction("Edit root…")
             act_rename = menu.addAction("Rename (display name)…")
             act_remove = menu.addAction("Remove root from tracking…")
 
             # Unmanaged is protected from destructive actions.
             if root.root_path is None or str(root.status).upper() == StorageManager.UNMANAGED_STATUS:
+                act_edit.setEnabled(False)
                 act_rename.setEnabled(False)
                 act_remove.setEnabled(False)
 
@@ -810,7 +841,9 @@ class ScanTab(QWidget):
             if chosen is None:
                 return
 
-            if chosen == act_rename:
+            if chosen == act_edit:
+                self._on_edit_root()
+            elif chosen == act_rename:
                 self._rename_storage_root(root)
             elif chosen == act_remove:
                 self._remove_root_from_tracking(root)
