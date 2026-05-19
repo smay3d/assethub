@@ -250,12 +250,13 @@ class DuplicatesView(QWidget):
         self._copy_btn.setEnabled(False)
 
     def _on_group_selected(self, _selected, _deselected) -> None:
-        idx = self._groups_table.currentIndex()
-        if not idx.isValid():
+        sel = self._groups_table.selectionModel()
+        rows = sel.selectedRows() if sel is not None else []
+        if not rows:
             self._detail_model.set_rows([])
             return
 
-        src_row = self._groups_proxy.mapToSource(idx).row()
+        src_row = self._groups_proxy.mapToSource(rows[0]).row()
         group = self._group_model.group_at(src_row)
         if group is None:
             self._detail_model.set_rows([])
@@ -287,7 +288,7 @@ class DuplicatesView(QWidget):
                     size_bytes=r.size_bytes,
                     mtime_unix=r.mtime_unix,
                     created_at=r.created_at,
-                    is_duplicate=False,  # Already in a duplicates context; no chip needed.
+                    is_duplicate=False,
                 )
             )
         self._detail_model.set_rows(file_rows)
