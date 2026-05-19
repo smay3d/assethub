@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from assethub.context import AppContext
 from assethub.core.db.schema import initialize_schema
 from assethub.core.db.file_records import query_library_files
+from assethub.core.db.duplicates import get_duplicate_file_ids
 from assethub.ui.models.file_table_model import FileRow, FileTableModel
 from assethub.ui.ui_constants import LIBRARY_CAP_ROWS
 from assethub.ui.views.file_detail_pane import FileDetailPane, compute_absolute_path
@@ -431,6 +432,8 @@ class LibraryTab(QWidget):
         total_in_db = result.total_in_db
         truncated = result.truncated
 
+        duplicate_ids = get_duplicate_file_ids(conn)
+
         file_rows = []
         for r in result.rows:
             rel_s = r.relative_path
@@ -450,6 +453,7 @@ class LibraryTab(QWidget):
                     size_bytes=r.size_bytes,
                     mtime_unix=r.mtime_unix,
                     created_at=r.created_at,
+                    is_duplicate=r.file_id in duplicate_ids,
                 )
             )
 

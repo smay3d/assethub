@@ -37,6 +37,7 @@ class FileRow:
     size_bytes: Optional[int]
     mtime_unix: Optional[float]
     created_at: str
+    is_duplicate: bool = False
 
 
 @dataclass(frozen=True)
@@ -193,6 +194,13 @@ class FileTableModel(QAbstractTableModel):
                 default_visible=False,
                 display=lambda r: r.created_at,
                 sort_value=lambda r: r.created_at,
+            ),
+            _Column(
+                key="tags",
+                header="Tags",
+                default_visible=True,
+                display=lambda r: "Duplicate" if r.is_duplicate else "",
+                sort_value=lambda r: 1 if r.is_duplicate else 0,
             ),
         ]
 
