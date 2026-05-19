@@ -146,6 +146,37 @@ def query_library_files(
     return LibraryQueryResult(rows=rows, total_in_db=total_in_db, truncated=truncated)
 
 
+def query_library_files_by_ids(
+    conn: sqlite3.Connection,
+    file_ids: Iterable[int],
+) -> List[LibraryFileRow]:
+    """Fetch full LibraryFileRow records for a specific set of file IDs.
+
+    Used by the Duplicates view detail panel to feed FileTableModel with
+    group members without reloading the full library.
+
+    Args:
+        conn: SQLite connection with an initialized schema.
+        file_ids: Iterable of file IDs to fetch.
+
+    Returns:
+        List of LibraryFileRow ordered by file.id. Empty if file_ids is empty.
+    """
+    ids = [int(x) for x in file_ids]
+    if not ids:
+        return []
+
+    ph = _placeholders(len(ids))
+    raw_rows = conn.execute(
+        _LIBRARY_FILE_SELECT
+        + f" WHERE file.id IN ({ph})"
+        + " ORDER BY file.id;",
+        tuple(ids),
+    ).fetchall()
+
+    return [_build_library_row(r) for r in raw_rows]
+
+
 def _placeholders(n: int) -> str:
     return ",".join(["?"] * n)
 

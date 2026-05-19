@@ -181,3 +181,45 @@ def test_row_fields_are_populated(tmp_path: Path) -> None:
     assert row.integrity_state == "OK"
     assert row.bound_asset_id is None
     assert row.owned_version_count == 0
+
+
+# ---------------------------------------------------------------------------
+# query_library_files_by_ids
+# ---------------------------------------------------------------------------
+
+def test_query_by_ids_returns_correct_files(tmp_path: Path) -> None:
+    """query_library_files_by_ids returns only the requested file IDs."""
+    from assethub.core.db.file_records import query_library_files_by_ids
+
+    conn = _mk_db(tmp_path)
+    sid = _insert_root(conn)
+    fid_a = _insert_file(conn, sid, "a.txt")
+    fid_b = _insert_file(conn, sid, "b.txt")
+    fid_c = _insert_file(conn, sid, "c.txt")
+
+    result = query_library_files_by_ids(conn, [fid_a, fid_b])
+    assert len(result) == 2
+    ids = {r.file_id for r in result}
+    assert fid_a in ids
+    assert fid_b in ids
+    assert fid_c not in ids
+
+
+def test_query_by_ids_empty_list_returns_empty(tmp_path: Path) -> None:
+    from assethub.core.db.file_records import query_library_files_by_ids
+
+    conn = _mk_db(tmp_path)
+    assert query_library_files_by_ids(conn, []) == []
+
+
+def test_query_by_ids_returns_library_file_rows(tmp_path: Path) -> None:
+    """Result items are LibraryFileRow instances (compatible with FileTableModel)."""
+    from assethub.core.db.file_records import query_library_files_by_ids, LibraryFileRow
+
+    conn = _mk_db(tmp_path)
+    sid = _insert_root(conn, "S", "/s")
+    fid = _insert_file(conn, sid, "x.txt")
+
+    result = query_library_files_by_ids(conn, [fid])
+    assert len(result) == 1
+    assert isinstance(result[0], LibraryFileRow)
