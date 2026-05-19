@@ -1,6 +1,6 @@
 # Raptor Architecture
 
-**Last updated:** 2026-05-13
+**Last updated:** 2026-05-18
 **Status:** Initial stub — update after any structural change to the codebase.
 
 ---
@@ -73,9 +73,10 @@ instantiated directly by UI code.
 
 | Subsystem | Module | Responsibility |
 |---|---|---|
-| DB | `core/db/` | Schema v7, migrations, typed query helpers |
+| DB | `core/db/` | Schema v8, migrations, typed query helpers |
+| Scan Exclusions | `core/db/scan_exclusions.py` | Per-root extension exclusion CRUD; normalizes extensions (lowercase, no dot) |
 | Storage | `core/storage/roots.py` | Root registration, longest-prefix path resolution, Unmanaged singleton |
-| Scanner | `core/scanner/scanner.py` | Walks registered roots, upserts file records (path, size, mtime) |
+| Scanner | `core/scanner/scanner.py` | Walks registered roots, upserts file records; skips excluded extensions per root |
 | Health | `core/health/checker.py` | Validates indexed files against disk; sets `integrity_state` |
 | Detection | `core/detection/` | Regex rule engine → reviewable asset proposals, no auto-writes |
 | Events | `core/events/event_hub.py` | Non-Qt pub/sub signaling (thread-safe RLock) |
@@ -88,10 +89,10 @@ instantiated directly by UI code.
 
 ## DB Schema
 
-**Current version:** v7
+**Current version:** v8
 
 **Tables:** `storage`, `asset`, `version`, `file`, `tag`, `asset_tag`,
-`file_binding`, `version_file`, `version_change_log`
+`file_binding`, `version_file`, `version_change_log`, `storage_scan_exclusion`
 
 **Key invariants:**
 - Every file belongs to exactly one storage root

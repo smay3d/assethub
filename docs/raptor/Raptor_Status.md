@@ -1,8 +1,8 @@
 # Raptor Status
 
-**Last updated:** 2026-05-13
+**Last updated:** 2026-05-18
 **Active branch:** `raptor`
-**Current milestone:** Pre-MVP — project reboot and workflow setup
+**Current milestone:** Pre-MVP — active feature development
 
 ---
 
@@ -40,32 +40,39 @@ Auto project detection · Smart folders
 
 ## Current Work
 
-**Phase:** Ready for implementation — workflow and tooling setup complete.
+**Phase:** Active feature development — `raptor` branch is clean, all tests passing (74).
 
-**Next action:** Install `raptor-session-start` and `raptor-session-end` as a local plugin,
-then begin the first implementation work: P1/P2 audit debt cleanup (see Open Items).
+**Next action:** Address P1/P2 audit debt (Open Items #1–2) before the next feature,
+or continue with next MVP feature from the milestone tracker.
 
 ---
 
 ## Last Session Summary
 
-**Date:** 2026-05-13
-**Session type:** Planning / design — Raptor reboot session 1
+**Date:** 2026-05-18
+**Session type:** Feature implementation + bug fix
 
 Completed:
-- Decided core approach: keep `core/` backend, rewrite `ui/` from scratch, stay on PySide6
-- Decided workflow: skill-driven iterative + GitHub Issues + feature branches on `raptor` branch
-- Wrote `CLAUDE_raptor.md` — Claude Code orientation and workflow rules
-- Created `docs/raptor/` with five core documents: Architecture, Changelog, Status,
-  ProjectSpec (v1.0, full product + engineering requirements), and brainstorm notes archived
-- Wrote `raptor-session-start` and `raptor-session-end` skills in `.claude/skills/`
-- Removed sidecar system from scope; confirmed tags as MVP; set scale target at 10k files
-- Moved legacy root-level design docs to `docs/ARCHIVE/`
+- **Library search bug fixed** — search was filtered client-side against a capped 10k-row
+  set; files beyond the cap were invisible. Fixed via `query_library_files()` in
+  `core/db/file_records.py` (SQL LIKE before LIMIT). `LibraryTab` now calls this function.
+  10 new tests in `tests/test_library_file_query.py`.
+- **UI freeze logged** — smay3d/assethub#1: synchronous `QImageReader.read()` on UI thread
+  during rapid scrolling of 180k-file library causes "(not responding)". Deferred to UI rewrite.
+- **Per-root scan exclusion list** (smay3d/assethub#2, PR #3, merged to `raptor`):
+  - Schema v8: `storage_scan_exclusion` table (FK cascade, unique constraint)
+  - `core/db/scan_exclusions.py`: Qt-free CRUD helpers; extensions normalized on write
+  - Scanner: loads exclusion sets before walk, skips matching files (Option A re-scan behavior)
+  - `ui/dialogs/edit_root_dialog.py`: new `EditRootDialog` — view/add/remove exclusions
+  - `ui/views/scan_tab.py`: "Edit…" toolbar button + "Edit root…" right-click menu entry
+  - 16 new tests (11 DB helper + 5 scanner)
+  - Manually verified: add exclusion → scan → absent from Library; remove → rescan → re-indexed
+- Deleted legacy root-level prototype docs (`AssetHub_DevLog_*.md`, `AssetHub_Stage9_*.md`,
+  `AssetHub_DesignSummary_v1.9.md`)
 
 Next session should start with:
-- Install skills as a local plugin so they're invocable via the Skill tool
-- Open GitHub Issues for the P1/P2 audit debt items (see Open Items #1–3)
-- Begin chore branch: delete dead code and fix `File.version_id` type
+- Address Open Items #1–2 (P1/P2 audit debt: `File.version_id` type fix, dead code deletion)
+- Or continue MVP features — see Milestone Tracker
 
 ---
 
@@ -76,6 +83,6 @@ Next session should start with:
 | 1 | Fix `File.version_id: int` → `Optional[int]` | P1 | Audit finding; fix before next feature |
 | 2 | Delete dead code: `core/config/defaults.py`, `core/utils/logging.py`, `core/utils/paths.py`, `core/sidecar/` | P2 | Audit findings; sidecar removed from scope |
 | 3 | Decide `AppConfig.rules_root` handling | P3 | Populate from defaults or remove the field |
-| 4 | Install skills as local plugin | High | Makes `raptor-session-start/end` invocable via Skill tool |
+| 4 | Fix UI freeze (smay3d/assethub#1) | P2 | Async preview loading needed; defer to UI rewrite |
 | 5 | Design UI visual style | Medium | Deferred to UI design stage; stub at `docs/raptor/Raptor_StyleGuide.md` |
 | 6 | Write `raptor-build` skill | Low | Needed before first beta distribution |
