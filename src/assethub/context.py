@@ -98,7 +98,7 @@ class AppContext:
         # Storage and indexing
         self.storage_manager = StorageManager(self.db_connection)
         self.storage_manager.ensure_unmanaged_storage()  # guarantee Unmanaged storage exists
-        self.scanner = Scanner(self.db_connection, self.storage_manager)
+        self.scanner = Scanner(self.db_connection, self.storage_manager, log=self.log)
 
         # Health checking (DB + Storage dependent)
         self.health_checker = HealthChecker(self.db_connection, self.storage_manager)
