@@ -37,6 +37,7 @@ from assethub.ui.views.file_detail_pane import FileDetailPane, compute_absolute_
 from assethub.ui.views.assets_library_widget import AssetsLibraryWidget
 from assethub.core.events.event_hub import DbChanged
 from assethub.ui.actions.library_actions import LibraryActions
+from assethub.ui.views.duplicates_view import DuplicatesView
 
 
 class _LibraryTableView(QTableView):
@@ -241,12 +242,18 @@ class LibraryTab(QWidget):
         self.btn_mode_assets.setText("Assets")
         self.btn_mode_assets.setCheckable(True)
 
+        self.btn_mode_duplicates = QToolButton(self)
+        self.btn_mode_duplicates.setText("Duplicates")
+        self.btn_mode_duplicates.setCheckable(True)
+
         self._mode_group.addButton(self.btn_mode_files, 0)
         self._mode_group.addButton(self.btn_mode_assets, 1)
+        self._mode_group.addButton(self.btn_mode_duplicates, 2)
 
         top.addWidget(QLabel("View:"))
         top.addWidget(self.btn_mode_files)
         top.addWidget(self.btn_mode_assets)
+        top.addWidget(self.btn_mode_duplicates)
 
         self.search_edit = QLineEdit(self)
         self.search_edit.setPlaceholderText("Search filename or path…")
@@ -321,6 +328,10 @@ class LibraryTab(QWidget):
         self.assets_widget = AssetsLibraryWidget(self.context, self)
         self.stack.addWidget(self.assets_widget)
 
+        # Duplicates mode widget
+        self.duplicates_view = DuplicatesView(self.context, self)
+        self.stack.addWidget(self.duplicates_view)
+
         # Restore splitter state (if available), otherwise use default ratios.
         self._restore_splitter_state()
         self.splitter.splitterMoved.connect(lambda *_: self._save_splitter_state())
@@ -385,14 +396,16 @@ class LibraryTab(QWidget):
             except Exception:
                 pass
 
-        self._mode = "files" if int(mode_id) == 0 else "assets"
-        self.stack.setCurrentIndex(0 if self._mode == "files" else 1)
+        mode_map = {0: "files", 1: "assets", 2: "duplicates"}
+        self._mode = mode_map.get(int(mode_id), "files")
+        stack_map = {"files": 0, "assets": 1, "duplicates": 2}
+        self.stack.setCurrentIndex(stack_map[self._mode])
 
         # Controls remain available in both modes.
         # - Integrity filter in Assets mode maps to missing_count (OK vs MISSING).
         # - Show hidden columns toggles internal columns in the active view.
-        self.integrity_combo.setEnabled(True)
-        self.chk_show_hidden.setEnabled(True)
+        self.integrity_combo.setEnabled(self._mode != "duplicates")
+        self.chk_show_hidden.setEnabled(self._mode != "duplicates")
         self.chk_unassigned_only.setEnabled(self._mode == "files")
 
         # Refresh current mode
@@ -422,6 +435,10 @@ class LibraryTab(QWidget):
                     version_id=self._assets_last_version_id,
                 )
             self.assets_widget.refresh()
+            return
+
+        if self._mode == "duplicates":
+            self.duplicates_view.refresh()
             return
 
         prev_selected_ids = list(self._selected_file_ids)
