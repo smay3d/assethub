@@ -1,9 +1,7 @@
-"""Checksum utilities.
+"""SHA-256 checksum utilities.
 
-Stage 7.5.3 adds a UI action to copy a checksum. The DB does not yet store
-checksums, so this computes a streaming SHA-256 on demand.
-
-To keep the UI responsive, callers should enforce reasonable caps (count/bytes).
+sha256_file() is called by the Scanner during incremental indexing to compute
+and store per-file checksums in the database.
 """
 
 from __future__ import annotations

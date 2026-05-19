@@ -144,6 +144,7 @@ class Scanner:
                                 self._log.warn(
                                     f"Checksum skipped (unreadable): {abs_path}"
                                 )
+                            need_checksum = False
 
                     self._upsert_file(
                         storage_id=root.id,
