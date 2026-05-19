@@ -13,7 +13,30 @@
       "Bash(where python:*)",
       "Bash(pip list:*)",
       "Bash(pip3 list:*)",
-      "Bash(py:*)"
+      "Bash(py:*)",
+      "Bash(mkdir -p \"Z:\\\\Art\\\\Scripts\\\\AssetHubProject\\\\AssetHub\\\\.claude\\\\skills\\\\session-start\")",
+      "Bash(mkdir -p \"Z:\\\\Art\\\\Scripts\\\\AssetHubProject\\\\AssetHub\\\\.claude\\\\skills\\\\session-end\")",
+      "Bash(mv \"Z:\\\\Art\\\\Scripts\\\\AssetHubProject\\\\AssetHub\\\\.claude\\\\skills\\\\session-start\" \"Z:\\\\Art\\\\Scripts\\\\AssetHubProject\\\\AssetHub\\\\.claude\\\\skills\\\\raptor-session-start\")",
+      "Bash(mv \"Z:\\\\Art\\\\Scripts\\\\AssetHubProject\\\\AssetHub\\\\.claude\\\\skills\\\\session-end\" \"Z:\\\\Art\\\\Scripts\\\\AssetHubProject\\\\AssetHub\\\\.claude\\\\skills\\\\raptor-session-end\")",
+      "Bash(python -m pytest --tb=short -q)",
+      "Bash(python main.py)",
+      "Bash(python -m pytest tests/test_library_file_query.py -x -q)",
+      "Bash(python -m pytest tests/test_library_file_query.py -v)",
+      "Bash(python -m pytest -x -q)",
+      "Bash(python -m pytest tests/test_db_schema.py -v)",
+      "Bash(pytest tests/test_scan_exclusions.py -v)",
+      "Bash(python -m pytest tests/test_scan_exclusions.py -v)",
+      "Bash(python -m pytest -q)",
+      "Bash(pytest -q)",
+      "Bash(python -m pytest tests/test_settings_tab_refresh.py tests/test_settings_tab_stats.py -v)",
+      "Bash(python -m pytest tests/test_scanner_exclusions.py -v)",
+      "Bash(python -c \"from assethub.ui.dialogs.edit_root_dialog import EditRootDialog; print\\('ok'\\)\")",
+      "Bash(PYTHONPATH=src python -c \"from assethub.ui.dialogs.edit_root_dialog import EditRootDialog; print\\('ok'\\)\")",
+      "Bash(python -c \"from assethub.ui.views.scan_tab import ScanTab; print\\('ok'\\)\")",
+      "Bash(PYTHONPATH=src python -c \"from assethub.ui.views.scan_tab import ScanTab; print\\('ok'\\)\")",
+      "Bash(python -m pytest -v)",
+      "Bash(python -c ':*)",
+      "Bash(/c/Program Files/GitHub CLI/gh.exe pr:*)"
     ]
   }
 }
