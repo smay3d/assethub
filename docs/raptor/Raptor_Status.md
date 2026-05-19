@@ -1,6 +1,6 @@
 # Raptor Status
 
-**Last updated:** 2026-05-18
+**Last updated:** 2026-05-18 (end of checksum dedupe session)
 **Active branch:** `raptor`
 **Current milestone:** Pre-MVP — active feature development
 
@@ -16,7 +16,7 @@ File ingest + disk tracking · Manual file → asset assignment · Search, filte
 | File ingest + disk tracking | Carried over (complete) | Core backend retained from prototype |
 | Manual file → asset assignment | Carried over (complete) | Backend retained; UI to be rewritten |
 | Search, filter, sort | Carried over (complete) | Backend retained; UI to be rewritten |
-| Duplicate file detection | Not started | New feature for Raptor |
+| Duplicate file detection | Complete | Schema v9 + incremental checksumming + Duplicates view |
 | UI rewrite (PySide6) | Not started | Replacing prototype UI from scratch |
 | `.exe` distribution (PyInstaller) | Not started | Required before any beta testing |
 
@@ -40,39 +40,47 @@ Auto project detection · Smart folders
 
 ## Current Work
 
-**Phase:** Active feature development — `raptor` branch is clean, all tests passing (74).
+**Phase:** Active feature development — `raptor` branch is clean, all tests passing (97).
 
-**Next action:** Address P1/P2 audit debt (Open Items #1–2) before the next feature,
-or continue with next MVP feature from the milestone tracker.
+**Next action:** Address P1/P2 audit debt (Open Items #1–2), or open a PR to land the
+checksum dedupe feature on `raptor` (branch is clean and complete).
 
 ---
 
 ## Last Session Summary
 
 **Date:** 2026-05-18
-**Session type:** Feature implementation + bug fix
+**Session type:** Full feature implementation — checksum deduplication (MVP)
 
-Completed:
-- **Library search bug fixed** — search was filtered client-side against a capped 10k-row
-  set; files beyond the cap were invisible. Fixed via `query_library_files()` in
-  `core/db/file_records.py` (SQL LIKE before LIMIT). `LibraryTab` now calls this function.
-  10 new tests in `tests/test_library_file_query.py`.
-- **UI freeze logged** — smay3d/assethub#1: synchronous `QImageReader.read()` on UI thread
-  during rapid scrolling of 180k-file library causes "(not responding)". Deferred to UI rewrite.
-- **Per-root scan exclusion list** (smay3d/assethub#2, PR #3, merged to `raptor`):
-  - Schema v8: `storage_scan_exclusion` table (FK cascade, unique constraint)
-  - `core/db/scan_exclusions.py`: Qt-free CRUD helpers; extensions normalized on write
-  - Scanner: loads exclusion sets before walk, skips matching files (Option A re-scan behavior)
-  - `ui/dialogs/edit_root_dialog.py`: new `EditRootDialog` — view/add/remove exclusions
-  - `ui/views/scan_tab.py`: "Edit…" toolbar button + "Edit root…" right-click menu entry
-  - 16 new tests (11 DB helper + 5 scanner)
-  - Manually verified: add exclusion → scan → absent from Library; remove → rescan → re-indexed
-- Deleted legacy root-level prototype docs (`AssetHub_DevLog_*.md`, `AssetHub_Stage9_*.md`,
-  `AssetHub_DesignSummary_v1.9.md`)
+Completed — all 13 commits on `raptor`, 97 tests passing:
+
+- **Schema v9** (`core/db/schema.py`, `core/model/file.py`): `file.checksum TEXT` nullable
+  column + `idx_file_checksum` index; `File.checksum: Optional[str] = None` field added;
+  `_migrate_to_v9()` idempotent migration.
+- **Incremental checksumming** (`core/scanner/scanner.py`, `context.py`): Scanner computes
+  SHA-256 per file only when `size_bytes`, `mtime_unix`, or `checksum` changed/is NULL.
+  `ScanResult` gains `files_checksummed` and `files_without_checksum`. `AppLog` injected
+  into Scanner via `context.py`. OSError during hashing preserves existing checksum.
+- **Duplicate query helpers** (`core/db/duplicates.py`): `DuplicateFile`, `DuplicateGroup`
+  dataclasses; `query_duplicate_groups()`, `get_duplicate_file_ids()`,
+  `count_checksummed_files()`. Qt-free.
+- **`query_library_files_by_ids`** (`core/db/file_records.py`): bridges `DuplicateFile`
+  IDs → `LibraryFileRow` objects for `FileTableModel` reuse in the detail panel.
+- **Tags column** (`ui/models/file_table_model.py`, `ui/ui_constants.py`): `FileRow.is_duplicate`
+  field; "Duplicate" chip shown in Tags column for duplicate files. `DEFAULT_VISIBLE_FILE_COLUMNS`
+  updated.
+- **`DuplicatesView` widget** (`ui/views/duplicates_view.py`): status banner, summary line,
+  groups table (`DuplicateGroupTableModel`, sortable by Copies/Size/Overlap/Locations),
+  detail panel (reuses `FileTableModel`), "Copy path(s)" clipboard action.
+- **LibraryTab wiring** (`ui/views/library_tab.py`): Duplicates as third mode (index 2 in
+  `QStackedWidget`); filter/search handlers short-circuit for duplicates mode.
+- **Tests**: `test_schema_v9.py` (5), `test_scanner_checksum.py` (6), `test_db_duplicates.py`
+  (11), plus 3 new tests in `test_library_file_query.py`. Total suite: 97 passing.
 
 Next session should start with:
+- Open a PR to merge `raptor` → `raptor` (or tag the checksum dedupe work)
 - Address Open Items #1–2 (P1/P2 audit debt: `File.version_id` type fix, dead code deletion)
-- Or continue MVP features — see Milestone Tracker
+- Begin UI rewrite or next MVP feature — see Milestone Tracker
 
 ---
 

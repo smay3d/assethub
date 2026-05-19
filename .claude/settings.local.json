@@ -36,7 +36,15 @@
       "Bash(PYTHONPATH=src python -c \"from assethub.ui.views.scan_tab import ScanTab; print\\('ok'\\)\")",
       "Bash(python -m pytest -v)",
       "Bash(python -c ':*)",
-      "Bash(/c/Program Files/GitHub CLI/gh.exe pr:*)"
+      "Bash(/c/Program Files/GitHub CLI/gh.exe pr:*)",
+      "Bash(xargs grep:*)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); skills=d.get\\('skills',{}\\); [print\\(k\\) for k in skills.keys\\(\\)]\")",
+      "Bash(python3 -c \"import json; d=json.load\\(open\\('/c/Users/scott/.claude/settings.json'\\)\\); print\\(list\\(d.keys\\(\\)\\)\\)\")",
+      "Bash(python3:*)",
+      "Bash(/c/Program Files/GitHub CLI/gh.exe issue:*)",
+      "Bash(bash:*)",
+      "Bash(python:*)",
+      "Bash(pytest:*)"
     ]
   }
 }

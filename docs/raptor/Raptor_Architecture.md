@@ -1,6 +1,6 @@
 # Raptor Architecture
 
-**Last updated:** 2026-05-18
+**Last updated:** 2026-05-18 (checksum dedupe)
 **Status:** Initial stub — update after any structural change to the codebase.
 
 ---
@@ -73,10 +73,11 @@ instantiated directly by UI code.
 
 | Subsystem | Module | Responsibility |
 |---|---|---|
-| DB | `core/db/` | Schema v8, migrations, typed query helpers |
+| DB | `core/db/` | Schema v9, migrations, typed query helpers |
 | Scan Exclusions | `core/db/scan_exclusions.py` | Per-root extension exclusion CRUD; normalizes extensions (lowercase, no dot) |
+| Duplicates | `core/db/duplicates.py` | Duplicate file detection by SHA-256 checksum; `DuplicateGroup`, `get_duplicate_file_ids`, `count_checksummed_files` |
 | Storage | `core/storage/roots.py` | Root registration, longest-prefix path resolution, Unmanaged singleton |
-| Scanner | `core/scanner/scanner.py` | Walks registered roots, upserts file records; skips excluded extensions per root |
+| Scanner | `core/scanner/scanner.py` | Walks registered roots, upserts file records, computes SHA-256 checksums incrementally; skips excluded extensions per root |
 | Health | `core/health/checker.py` | Validates indexed files against disk; sets `integrity_state` |
 | Detection | `core/detection/` | Regex rule engine → reviewable asset proposals, no auto-writes |
 | Events | `core/events/event_hub.py` | Non-Qt pub/sub signaling (thread-safe RLock) |
@@ -89,10 +90,12 @@ instantiated directly by UI code.
 
 ## DB Schema
 
-**Current version:** v8
+**Current version:** v9
 
 **Tables:** `storage`, `asset`, `version`, `file`, `tag`, `asset_tag`,
 `file_binding`, `version_file`, `version_change_log`, `storage_scan_exclusion`
+
+**v9 addition:** `file.checksum TEXT` (nullable SHA-256 hex digest) + `idx_file_checksum` index.
 
 **Key invariants:**
 - Every file belongs to exactly one storage root
@@ -110,7 +113,8 @@ instantiated directly by UI code.
 **MainWindow** holds a vertical splitter: tab area (top) + global log view (bottom).
 
 **Tabs:**
-- **LibraryTab** — browse/filter files and assets; `FileTableModel` + `QSortFilterProxyModel`
+- **LibraryTab** — browse/filter files and assets; three modes: Files, Assets, Duplicates.
+  `FileTableModel` + `QSortFilterProxyModel`; `DuplicatesView` in a `QStackedWidget` at index 2.
 - **ScanTab** — register roots, trigger scans, run health checks, preview detection proposals
 - **SettingsTab** — config display, diagnostics, theme toggle
 

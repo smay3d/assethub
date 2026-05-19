@@ -13,6 +13,47 @@ Versions:
 
 ## [Unreleased]
 
+### Checksum deduplication (2026-05-18)
+
+#### Added
+- `file.checksum TEXT` column (schema v9, nullable — NULL means not yet computed)
+- `idx_file_checksum` index on `file(checksum)` for fast group queries
+- `_migrate_to_v9()` migration: idempotent `ALTER TABLE` + index creation
+- `core/db/duplicates.py` — Qt-free query helpers:
+  - `DuplicateFile`, `DuplicateGroup` frozen dataclasses
+  - `query_duplicate_groups(conn)` — groups files by shared checksum, sorted by overlap
+  - `get_duplicate_file_ids(conn)` — `frozenset[int]` for O(1) duplicate membership testing
+  - `count_checksummed_files(conn)` — returns `(checksummed, total)` for status banner
+- `core/db/file_records.py` — `query_library_files_by_ids(conn, file_ids)` helper for
+  the Duplicates detail panel
+- `ui/views/duplicates_view.py` — `DuplicatesView` widget:
+  - Status banner (shown when files lack checksums)
+  - Summary line: N groups · M redundant copies · X overlap
+  - Groups table (`DuplicateGroupTableModel`) with sortable Copies/Size/Overlap/Locations columns
+  - Detail panel reusing `FileTableModel`; multi-select + "Copy path(s)" clipboard action
+- `FileRow.is_duplicate: bool = False` field added to `file_table_model.py`
+- Tags column added to `FileTableModel` — shows "Duplicate" chip for duplicate files
+- `"Tags"` added to `DEFAULT_VISIBLE_FILE_COLUMNS` in `ui_constants.py`
+- Library tab gains a third mode button: **Duplicates** (index 2 in `QStackedWidget`)
+- Tests: `test_schema_v9.py` (5), `test_scanner_checksum.py` (6), `test_db_duplicates.py` (11),
+  plus 3 new tests in `test_library_file_query.py`
+
+#### Changed
+- Scanner now computes SHA-256 checksums incrementally during scan:
+  checksum is (re)computed only when `size_bytes`, `mtime_unix`, or `checksum` changed/is NULL
+- `ScanResult` gains `files_checksummed` and `files_without_checksum` fields
+- `Scanner.__init__` accepts optional `log: Optional[AppLog]` parameter;
+  `AppContext` now passes `log=self.log` to `Scanner`
+- `LibraryTab._on_search_changed` and filter handlers now short-circuit in duplicates mode
+
+#### Fixed
+- `sha256_file()` `OSError` during scan no longer clears an existing valid checksum;
+  `need_checksum` is set to `False` on failure so the stored value is preserved
+- `_on_group_selected` in `DuplicatesView` now uses `selectionModel().selectedRows()`
+  instead of `currentIndex()`, preventing stale detail panel on keyboard navigation
+
+---
+
 ### Per-root scan exclusion list + Library search fix (2026-05-18)
 
 #### Added
