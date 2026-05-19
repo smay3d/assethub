@@ -20,6 +20,7 @@ DEFAULT_VISIBLE_FILE_COLUMNS: tuple[str, ...] = (
     "Size",
     "Modified",
     "Integrity",
+    "Tags",
 )
 
 # Previews

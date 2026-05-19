@@ -198,7 +198,7 @@ class FileTableModel(QAbstractTableModel):
             _Column(
                 key="tags",
                 header="Tags",
-                default_visible=True,
+                default_visible=_is_default_visible("Tags"),
                 display=lambda r: "Duplicate" if r.is_duplicate else "",
                 sort_value=lambda r: 1 if r.is_duplicate else 0,
             ),
