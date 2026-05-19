@@ -194,8 +194,6 @@ class LibraryTab(QWidget):
         self._is_restoring_selection: bool = False
         self._unsub_db_changed = self.context.event_hub.db_changed.subscribe(self._on_db_changed)
 
-        self._is_restoring_selection: bool = False
-
         self._build_ui()
         self._wire_events()
 
@@ -410,7 +408,8 @@ class LibraryTab(QWidget):
 
         # Refresh current mode
         self.refresh()
-# -----------------
+
+    # -----------------
     # Public API
     # -----------------
 
@@ -523,17 +522,13 @@ class LibraryTab(QWidget):
         self._on_integrity_filter_changed()
 
     def _on_storage_filter_changed(self) -> None:
-        if self._mode == "assets":
-            self.assets_widget.set_storage_id(self._current_storage_filter())
-            self.assets_widget.refresh()
+        if self._mode in ("assets", "duplicates"):
             return
         self.proxy.set_storage_id(self._current_storage_filter())
         self._update_status_label()
 
     def _on_integrity_filter_changed(self) -> None:
-        if self._mode == "assets":
-            self.assets_widget.set_integrity_filter(self._current_integrity_filter())
-            # no refresh needed; proxy filtering is dynamic
+        if self._mode in ("assets", "duplicates"):
             return
         self.proxy.set_integrity(self._current_integrity_filter())
         self._update_status_label()
