@@ -3,8 +3,6 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-import pytest
-
 
 def test_latest_schema_version_is_9() -> None:
     from assethub.core.db.schema import LATEST_SCHEMA_VERSION
