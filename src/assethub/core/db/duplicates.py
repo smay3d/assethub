@@ -143,7 +143,7 @@ def count_checksummed_files(conn: sqlite3.Connection) -> Tuple[int, int]:
         Tuple of (number of files with non-NULL checksum, total file count).
     """
     row = conn.execute(
-        "SELECT COUNT(*) FILTER (WHERE checksum IS NOT NULL), COUNT(*) FROM file;"
+        "SELECT COUNT(CASE WHEN checksum IS NOT NULL THEN 1 END), COUNT(*) FROM file;"
     ).fetchone()
     if row is None:
         return (0, 0)

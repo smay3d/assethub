@@ -288,7 +288,7 @@ class DuplicatesView(QWidget):
                     size_bytes=r.size_bytes,
                     mtime_unix=r.mtime_unix,
                     created_at=r.created_at,
-                    is_duplicate=False,
+                    is_duplicate=True,  # All files in the detail panel are confirmed duplicates.
                 )
             )
         self._detail_model.set_rows(file_rows)

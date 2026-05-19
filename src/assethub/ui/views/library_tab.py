@@ -369,6 +369,8 @@ class LibraryTab(QWidget):
         if self._mode == "assets":
             self.assets_widget.set_search_text(text)
             return
+        if self._mode == "duplicates":
+            return
         # Search is server-side: refresh queries the DB with the new term.
         self.refresh()
 
