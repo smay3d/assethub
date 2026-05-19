@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -12,3 +13,4 @@ class File:
     storage_id: int
     relative_path: str
     integrity_state: str
+    checksum: Optional[str] = None

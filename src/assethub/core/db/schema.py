@@ -24,7 +24,7 @@ import sqlite3
 from typing import Callable, Dict
 
 
-LATEST_SCHEMA_VERSION = 8
+LATEST_SCHEMA_VERSION = 9
 
 
 def get_schema_version(conn: sqlite3.Connection) -> int:
@@ -114,6 +114,7 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
         integrity_state TEXT NOT NULL DEFAULT 'OK',
         size_bytes      INTEGER,
         mtime_unix      REAL,
+        checksum        TEXT,
         created_at      TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
         updated_at      TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
         UNIQUE(storage_id, relative_path),
@@ -235,6 +236,14 @@ def _ensure_latest_indexes(conn: sqlite3.Connection) -> None:
             )
         else:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_version_asset_id ON version(asset_id);")
+    except Exception:
+        pass
+
+    # File (v9): checksum column and index
+    try:
+        file_cols = [str(r[1]) for r in conn.execute("PRAGMA table_info(file);").fetchall()]
+        if "checksum" in file_cols:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_file_checksum ON file(checksum);")
     except Exception:
         pass
 
@@ -623,6 +632,22 @@ def _migrate_to_v8(conn: sqlite3.Connection) -> None:
     _record_schema_version(conn, 8)
 
 
+def _migrate_to_v9(conn: sqlite3.Connection) -> None:
+    """Migrate to schema v9.
+
+    v9 adds per-file SHA-256 checksums:
+      - file.checksum TEXT (nullable, NULL means not yet computed)
+      - idx_file_checksum index on file(checksum)
+
+    Migration is forward-only and idempotent.
+    """
+    cols = [str(r[1]) for r in conn.execute("PRAGMA table_info(file);").fetchall()]
+    if "checksum" not in cols:
+        conn.execute("ALTER TABLE file ADD COLUMN checksum TEXT;")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_file_checksum ON file(checksum);")
+    _record_schema_version(conn, 9)
+
+
 _MIGRATIONS: Dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_to_v2,
     3: _migrate_to_v3,
@@ -631,4 +656,5 @@ _MIGRATIONS: Dict[int, Callable[[sqlite3.Connection], None]] = {
     6: _migrate_to_v6,
     7: _migrate_to_v7,
     8: _migrate_to_v8,
+    9: _migrate_to_v9,
 }
