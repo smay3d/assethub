@@ -29,9 +29,9 @@ from assethub.core.db.connection import get_connection
 from assethub.core.db.file_records import purge_all_missing_file_records
 from assethub.core.db.schema import initialize_schema
 from assethub.core.health.checker import HealthChecker
-from assethub.core.scanner.scanner import Scanner
+from assethub.core.scanner.scanner import ChecksumResult, Scanner
 from assethub.core.storage.roots import StorageManager, StorageRoot
-from assethub.core.events.event_hub import DbChanged, ScanFinished, HealthFinished
+from assethub.core.events.event_hub import ChecksumFinished, DbChanged, HealthFinished, ScanFinished
 from assethub.core.detection.rules_loader import load_detection_ruleset
 from assethub.core.detection.engine import detect_proposals_for_storage
 from assethub.core.detection.apply import (
@@ -108,6 +108,8 @@ class ScanTab(QWidget):
 
         self._current_job: Optional[str] = None
         self._cancel_event: Optional[Event] = None
+        self._current_checksum_job: Optional[str] = None
+        self._checksum_cancel: Optional[Event] = None
 
         self._build_ui()
         self.refresh_roots()
@@ -176,16 +178,23 @@ class ScanTab(QWidget):
     # -------------------------
 
     def request_cancel_current_job(self) -> None:
-        """Request cancellation of the current job (scan/health)."""
-        if self._cancel_event is None or self._current_job is None:
-            return
-        if not self._cancel_event.is_set():
-            self._cancel_event.set()
-            self.status_label.setText(f"Cancel requested ({self._current_job})…")
-            try:
-                self.context.log.warn(f"Cancel requested: {self._current_job}")
-            except Exception:
-                pass
+        """Request cancellation of the active primary job or checksum pass (ESC)."""
+        if self._current_job is not None and self._cancel_event is not None:
+            if not self._cancel_event.is_set():
+                self._cancel_event.set()
+                self.status_label.setText(f"Cancel requested ({self._current_job})…")
+                try:
+                    self.context.log.warn(f"Cancel requested: {self._current_job}")
+                except Exception:
+                    pass
+        elif self._current_checksum_job is not None and self._checksum_cancel is not None:
+            if not self._checksum_cancel.is_set():
+                self._checksum_cancel.set()
+                self.status_label.setText("Cancel requested (checksum)…")
+                try:
+                    self.context.log.warn("Cancel requested: checksum")
+                except Exception:
+                    pass
 
     def refresh_roots(self) -> None:
         sm = self._require_storage_manager()
@@ -366,6 +375,9 @@ class ScanTab(QWidget):
 
     @Slot()
     def _on_scan(self) -> None:
+        # Cancel any running checksum pass before starting a new index scan.
+        if self._current_checksum_job is not None and self._checksum_cancel is not None:
+            self._checksum_cancel.set()
         try:
             self.context.log.info("Scan roots: started")
         except Exception:
@@ -665,7 +677,6 @@ class ScanTab(QWidget):
 
         if isinstance(result, ScanSummary):
             tag = "canceled" if result.canceled else "ok"
-            self.status_label.setText(f"Scan complete ({tag})")
             try:
                 self.context.log.info(
                     f"Scan roots: indexed {result.files_indexed} file(s) in {result.elapsed_s:.2f}s ({tag})"
@@ -687,6 +698,7 @@ class ScanTab(QWidget):
                 self.context.event_hub.db_changed.emit(
                     DbChanged(reason="scan_index_updated", payload={"files_indexed": int(result.files_indexed)})
                 )
+            self._start_checksum_job()
         elif isinstance(result, HealthSummary):
             tag = "canceled" if result.canceled else "ok"
             self.status_label.setText(f"Health check complete ({tag})")
@@ -754,7 +766,7 @@ class ScanTab(QWidget):
             storage = StorageManager(conn)
             storage.ensure_unmanaged_storage()
             scanner = Scanner(conn, storage)
-            res = scanner.scan_all(cancel_check=cancel.is_set)
+            res = scanner.scan_files_only(cancel_check=cancel.is_set)
             elapsed = time.perf_counter() - start
             return ScanSummary(files_indexed=res.files_indexed, canceled=res.canceled, elapsed_s=elapsed)
         finally:
@@ -781,6 +793,86 @@ class ScanTab(QWidget):
             )
         finally:
             conn.close()
+
+    def _start_checksum_job(self) -> None:
+        """Start Stage 2: hash all NULL-checksum files in a silent background worker."""
+        if self.context.thread_pool is None:
+            self.status_label.setText("Scan complete")
+            return
+        self._current_checksum_job = "checksum"
+        self._checksum_cancel = Event()
+        self.status_label.setText("Indexing complete — computing checksums in background")
+
+        signals = _WorkerSignals()
+        signals.finished.connect(self._on_checksum_finished)
+        signals.error.connect(self._on_checksum_error)
+
+        worker = _CancelableWorker(
+            fn=self._checksum_job,
+            cancel_event=self._checksum_cancel,
+            signals=signals,
+        )
+        self.context.thread_pool.start(worker)
+
+    def _checksum_job(self, cancel: Event) -> ChecksumResult:
+        conn = get_connection(self.context.config.db_path)
+        try:
+            initialize_schema(conn)
+            storage = StorageManager(conn)
+            storage.ensure_unmanaged_storage()
+            scanner = Scanner(conn, storage)
+            return scanner.compute_missing_checksums(cancel_check=cancel.is_set)
+        finally:
+            conn.close()
+
+    @Slot(object)
+    def _on_checksum_finished(self, result: object) -> None:
+        self._current_checksum_job = None
+        self._checksum_cancel = None
+
+        if not isinstance(result, ChecksumResult):
+            return
+
+        if result.canceled:
+            self.status_label.setText("Checksum pass canceled")
+        else:
+            self.status_label.setText("Scan complete — checksums up to date")
+
+        try:
+            tag = "canceled" if result.canceled else "ok"
+            self.context.log.info(
+                f"Checksum pass: {result.files_checksummed} checksummed, "
+                f"{result.files_failed} failed ({tag})"
+            )
+        except Exception:
+            pass
+
+        self.context.event_hub.checksum_finished.emit(
+            ChecksumFinished(
+                summary={
+                    "files_checksummed": int(result.files_checksummed),
+                    "files_failed": int(result.files_failed),
+                    "canceled": bool(result.canceled),
+                }
+            )
+        )
+        if result.files_checksummed > 0:
+            self.context.event_hub.db_changed.emit(
+                DbChanged(
+                    reason="checksums_updated",
+                    payload={"files_checksummed": int(result.files_checksummed)},
+                )
+            )
+
+    @Slot(str)
+    def _on_checksum_error(self, message: str) -> None:
+        self._current_checksum_job = None
+        self._checksum_cancel = None
+        self.status_label.setText("Checksum pass failed")
+        try:
+            self.context.log.error(f"Checksum pass failed: {message}")
+        except Exception:
+            pass
 
     # -------------------------
     # Helpers
