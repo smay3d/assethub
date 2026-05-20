@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-import time
 from pathlib import Path
 
 
@@ -69,12 +67,22 @@ def test_scan_files_only_nulls_stale_checksum(tmp_path: Path) -> None:
     original = conn.execute("SELECT checksum FROM file WHERE relative_path='c.txt'").fetchone()[0]
     assert original is not None
 
-    # Modify the file so size and mtime change.
-    time.sleep(0.05)
+    # Modify the file — the larger content guarantees a size change.
     f.write_bytes(b"version 2 - different content")
-    os.utime(str(f), None)
 
     scanner.scan_files_only()
 
     row = conn.execute("SELECT checksum FROM file WHERE relative_path='c.txt'").fetchone()
     assert row[0] is None, "scan_files_only did not NULL the stale checksum after file changed"
+
+
+def test_scan_files_only_cancel_stops_early(tmp_path: Path) -> None:
+    conn, sm, root = _make_env(tmp_path)
+    for i in range(5):
+        (Path(root) / f"file{i}.txt").write_bytes(f"content {i}".encode())
+    scanner = _make_scanner(conn, sm)
+
+    result = scanner.scan_files_only(cancel_check=lambda: True)
+
+    assert result.canceled
+    assert result.files_indexed == 0

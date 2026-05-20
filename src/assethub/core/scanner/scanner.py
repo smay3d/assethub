@@ -189,6 +189,7 @@ class Scanner:
             try:
                 return bool(cancel_check())
             except Exception:
+                # Never allow cancel callback failures to crash a scan.
                 return False
 
         for root in roots:
