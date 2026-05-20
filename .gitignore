@@ -17,3 +17,9 @@ ENV/
 # OS junk
 .DS_Store
 Thumbs.db
+
+# Claude Code / Superpowers — local and generated files
+.claude/settings.local.json
+.claude/skills/*-workspace/
+.clone/
+.superpowers/
