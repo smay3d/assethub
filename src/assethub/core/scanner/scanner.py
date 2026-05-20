@@ -22,6 +22,16 @@ class ScanResult:
     canceled: bool = False
 
 
+@dataclass(frozen=True)
+class ChecksumResult:
+    files_checksummed: int
+    files_failed: int
+    canceled: bool
+
+
+_CHECKSUM_BATCH_SIZE = 50
+
+
 class Scanner:
     """Walk storage roots, discover files, and update the database index.
 
@@ -272,6 +282,102 @@ class Scanner:
             files_indexed=indexed,
             files_checksummed=0,
             files_without_checksum=self._count_without_checksum(),
+            canceled=False,
+        )
+
+    def compute_missing_checksums(
+        self, *, cancel_check: Optional[Callable[[], bool]] = None
+    ) -> ChecksumResult:
+        """Stage 2 of two-pass scanning: hash all files with checksum IS NULL.
+
+        Processes files in batches and re-queries after each batch so that
+        files indexed by a concurrent Stage 1 are picked up automatically.
+
+        Files that raise OSError during hashing are skipped (files_failed is
+        incremented) and retain checksum=NULL for retry on the next call.
+        """
+        files_checksummed = 0
+        files_failed = 0
+        failed_ids: set[int] = set()
+
+        # Build storage_id -> root_path lookup once per call.
+        root_map: dict[int, str] = {
+            r.id: r.root_path
+            for r in self._storage.list_roots()
+            if r.root_path is not None
+        }
+
+        def _should_cancel() -> bool:
+            if cancel_check is None:
+                return False
+            try:
+                return bool(cancel_check())
+            except Exception:
+                # Never allow cancel callback failures to crash a scan.
+                return False
+
+        while True:
+            if _should_cancel():
+                return ChecksumResult(
+                    files_checksummed=files_checksummed,
+                    files_failed=files_failed,
+                    canceled=True,
+                )
+
+            if failed_ids:
+                ph = ",".join("?" * len(failed_ids))
+                rows = self._conn.execute(
+                    f"SELECT id, storage_id, relative_path FROM file "
+                    f"WHERE checksum IS NULL AND id NOT IN ({ph}) LIMIT ?",
+                    (*sorted(failed_ids), _CHECKSUM_BATCH_SIZE),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT id, storage_id, relative_path FROM file "
+                    "WHERE checksum IS NULL LIMIT ?",
+                    (_CHECKSUM_BATCH_SIZE,),
+                ).fetchall()
+
+            if not rows:
+                break
+
+            for file_id, storage_id, relative_path in rows:
+                if _should_cancel():
+                    self._conn.commit()
+                    return ChecksumResult(
+                        files_checksummed=files_checksummed,
+                        files_failed=files_failed,
+                        canceled=True,
+                    )
+
+                root_path = root_map.get(int(storage_id))
+                if root_path is None:
+                    failed_ids.add(int(file_id))
+                    files_failed += 1
+                    continue
+
+                abs_path = os.path.join(root_path, relative_path.replace("/", os.sep))
+
+                try:
+                    checksum = sha256_file(abs_path)
+                except OSError:
+                    if self._log is not None:
+                        self._log.warn(f"Checksum skipped (unreadable): {abs_path}")
+                    failed_ids.add(int(file_id))
+                    files_failed += 1
+                    continue
+
+                self._conn.execute(
+                    "UPDATE file SET checksum=? WHERE id=?",
+                    (checksum, int(file_id)),
+                )
+                files_checksummed += 1
+
+            self._conn.commit()
+
+        return ChecksumResult(
+            files_checksummed=files_checksummed,
+            files_failed=files_failed,
             canceled=False,
         )
 
