@@ -398,6 +398,8 @@ class ScanTab(QWidget):
 
         This does NOT delete files from disk; it only removes DB tracking rows.
         """
+        if self._current_checksum_job is not None and self._checksum_cancel is not None:
+            self._checksum_cancel.set()
         if self._current_job is not None:
             QMessageBox.information(self, "AssetHub", "A job is running. Cancel or wait before cleanup.")
             try:
@@ -742,6 +744,9 @@ class ScanTab(QWidget):
         except Exception:
             pass
         QMessageBox.critical(self, "AssetHub", f"{job or 'Job'} failed:\n\n{message}")
+        # Even after a scan error, start Stage 2 — partial indexing may have left NULL checksums.
+        if job == "scan":
+            self._start_checksum_job()
 
     def _set_busy(self, busy: bool) -> None:
         self.btn_add_root.setEnabled(not busy)
@@ -992,6 +997,8 @@ class ScanTab(QWidget):
             - Does not delete files from disk.
             - Disallows Unmanaged.
         """
+        if self._current_checksum_job is not None and self._checksum_cancel is not None:
+            self._checksum_cancel.set()
         if self._current_job is not None:
             QMessageBox.information(
                 self, "AssetHub", "A job is running. Cancel or wait before removing roots."
