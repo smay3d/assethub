@@ -110,6 +110,7 @@ class ScanTab(QWidget):
         self._cancel_event: Optional[Event] = None
         self._current_checksum_job: Optional[str] = None
         self._checksum_cancel: Optional[Event] = None
+        self._checksum_restart_pending: bool = False
 
         self._build_ui()
         self.refresh_roots()
@@ -801,6 +802,10 @@ class ScanTab(QWidget):
 
     def _start_checksum_job(self) -> None:
         """Start Stage 2: hash all NULL-checksum files in a silent background worker."""
+        if self._current_checksum_job is not None:
+            # Old worker is still winding down (cancel was just set). Defer restart.
+            self._checksum_restart_pending = True
+            return
         if self.context.thread_pool is None:
             self.status_label.setText("Scan complete")
             return
@@ -834,6 +839,11 @@ class ScanTab(QWidget):
     def _on_checksum_finished(self, result: object) -> None:
         self._current_checksum_job = None
         self._checksum_cancel = None
+
+        if self._checksum_restart_pending:
+            self._checksum_restart_pending = False
+            self._start_checksum_job()
+            return
 
         if not isinstance(result, ChecksumResult):
             return
@@ -873,6 +883,12 @@ class ScanTab(QWidget):
     def _on_checksum_error(self, message: str) -> None:
         self._current_checksum_job = None
         self._checksum_cancel = None
+
+        if self._checksum_restart_pending:
+            self._checksum_restart_pending = False
+            self._start_checksum_job()
+            return
+
         self.status_label.setText("Checksum pass failed")
         try:
             self.context.log.error(f"Checksum pass failed: {message}")

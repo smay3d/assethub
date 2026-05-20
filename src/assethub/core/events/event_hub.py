@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from threading import RLock
-from typing import Any, Callable, Dict, Generic, List, Optional, Tuple, TypeVar
+from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar
 
 
 T = TypeVar("T")
