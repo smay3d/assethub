@@ -166,6 +166,114 @@ class Scanner:
             canceled=False,
         )
 
+    def scan_files_only(self, *, cancel_check: Optional[Callable[[], bool]] = None) -> ScanResult:
+        """Stage 1 of two-pass scanning: index files without computing checksums.
+
+        - New or changed files: upsert with checksum = NULL (marks them pending).
+        - Unchanged files: upsert preserving any existing checksum.
+
+        Never calls sha256_file(). Touches disk only via os.stat().
+        """
+        roots = self._scan_roots()
+        discovered: List[str] = []
+        indexed = 0
+
+        exclusions: dict[int, frozenset[str]] = {
+            root.id: get_exclusions(self._conn, root.id)
+            for root in roots
+        }
+
+        def _should_cancel() -> bool:
+            if cancel_check is None:
+                return False
+            try:
+                return bool(cancel_check())
+            except Exception:
+                return False
+
+        for root in roots:
+            if root.root_path is None:
+                continue
+
+            if _should_cancel():
+                self._conn.commit()
+                return ScanResult(
+                    discovered_paths=discovered,
+                    files_indexed=indexed,
+                    files_checksummed=0,
+                    files_without_checksum=self._count_without_checksum(),
+                    canceled=True,
+                )
+
+            for dirpath, _dirnames, filenames in os.walk(root.root_path):
+                if _should_cancel():
+                    self._conn.commit()
+                    return ScanResult(
+                        discovered_paths=discovered,
+                        files_indexed=indexed,
+                        files_checksummed=0,
+                        files_without_checksum=self._count_without_checksum(),
+                        canceled=True,
+                    )
+                for fname in filenames:
+                    if _should_cancel():
+                        self._conn.commit()
+                        return ScanResult(
+                            discovered_paths=discovered,
+                            files_indexed=indexed,
+                            files_checksummed=0,
+                            files_without_checksum=self._count_without_checksum(),
+                            canceled=True,
+                        )
+
+                    ext = os.path.splitext(fname)[1].lstrip(".").lower()
+                    if ext and ext in exclusions.get(root.id, frozenset()):
+                        continue
+
+                    abs_path = os.path.join(dirpath, fname)
+                    try:
+                        st = os.stat(abs_path)
+                    except FileNotFoundError:
+                        continue
+
+                    rel = os.path.relpath(abs_path, root.root_path)
+                    rel = rel.replace("\\", "/")
+
+                    disk_size = int(st.st_size)
+                    disk_mtime = float(st.st_mtime)
+
+                    old_row = self._conn.execute(
+                        "SELECT size_bytes, mtime_unix "
+                        "FROM file WHERE storage_id=? AND relative_path=?",
+                        (root.id, rel),
+                    ).fetchone()
+
+                    file_changed = (
+                        old_row is None
+                        or old_row[0] != disk_size
+                        or old_row[1] != disk_mtime
+                    )
+
+                    self._upsert_file(
+                        storage_id=root.id,
+                        relative_path=rel,
+                        size_bytes=disk_size,
+                        mtime_unix=disk_mtime,
+                        checksum=None,
+                        update_checksum=file_changed,
+                    )
+                    discovered.append(abs_path)
+                    indexed += 1
+
+        self._conn.commit()
+        return ScanResult(
+            discovered_paths=discovered,
+            files_indexed=indexed,
+            files_checksummed=0,
+            files_without_checksum=self._count_without_checksum(),
+            canceled=False,
+        )
+
     # ---------------------------
     # Internals
     # ---------------------------
