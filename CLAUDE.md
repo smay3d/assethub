@@ -135,7 +135,9 @@ guarantees. Do not add defensive checks for conditions that cannot occur.
 | Situation | Invoke |
 |---|---|
 | Starting a session | `raptor-session-start` |
+| Logging a discovered issue during app use | `raptor-inbox` → appends to `docs/raptor/Raptor_Inbox.md` |
 | New feature or significant behavior change | `superpowers:brainstorming` → `superpowers:writing-plans` |
+| **Before executing any implementation plan** | **Open a GitHub Issue + create a feature branch first — no exceptions** |
 | Any implementation work (feature or fix) | `superpowers:test-driven-development` |
 | Any bug or unexpected behavior | `superpowers:systematic-debugging` |
 | Before claiming work is complete | `superpowers:verification-before-completion` |
@@ -145,8 +147,11 @@ guarantees. Do not add defensive checks for conditions that cannot occur.
 
 ### Feature Development Loop
 
+> **The feature branch must exist before any implementation begins — including before dispatching
+> subagents or executing a plan.** Do not write code on `raptor` directly.
+
 1. Open a GitHub Issue describing the task
-2. Create a feature branch: `git checkout -b feature/<short-name>`
+2. **Create a feature branch immediately: `git checkout -b feature/<short-name>`**
 3. Brainstorm → plan → implement (TDD) → verify
 4. Open a PR: `feature/<name>` → `raptor`
 5. Review and merge; delete the feature branch
@@ -185,7 +190,9 @@ docs: update architecture doc after scanner refactor
 
 ### Rules
 
-- Never commit feature work directly to `raptor` — always use a feature branch and PR.
+- **Never commit feature work directly to `raptor`** — always use a feature branch and PR.
+  This applies equally when executing plans via `superpowers:subagent-driven-development` or
+  any other automated workflow. The branch must exist before the first subagent is dispatched.
 - All tests must pass before opening a PR.
 - Always run `raptor-session-end` before closing Claude Code for the day.
 - Do not force-push to `raptor` or `main`.
