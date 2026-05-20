@@ -13,6 +13,51 @@ Versions:
 
 ## [Unreleased]
 
+### Two-pass scanner — non-blocking background checksumming (2026-05-20)
+
+#### Added
+- `Scanner.scan_files_only(cancel_check=None) -> ScanResult` — Stage 1: walks roots and
+  upserts file records without computing checksums; new/changed files get `checksum = NULL`;
+  unchanged files preserve their existing checksum
+- `Scanner.compute_missing_checksums(cancel_check=None) -> ChecksumResult` — Stage 2:
+  batch re-query loop (`LIMIT 50`) hashing all `checksum IS NULL` files; `failed_ids` set
+  prevents infinite loops on permanently unreadable files
+- `ChecksumResult` frozen dataclass (`files_checksummed`, `files_failed`, `canceled`)
+- `ChecksumFinished` event on `EventHub` — emitted when Stage 2 completes or is canceled
+- `ScanTab._current_checksum_job` and `_checksum_cancel` — second independent job slot;
+  never disables any UI button
+- `ScanTab._start_checksum_job()`, `_checksum_job()`, `_on_checksum_finished()`,
+  `_on_checksum_error()` — Stage 2 lifecycle methods
+- `ScanTab._checksum_restart_pending` flag — defers Stage 2 restart when a prior checksum
+  worker is still winding down, preventing two concurrent workers
+- `tests/test_scanner_two_pass.py` — 9 tests: `scan_files_only` behavior (null-preservation,
+  stale-null, unchanged-file preservation, cancel), `compute_missing_checksums` behavior
+  (batch overflow, cancel mid-batch, unreadable file skip), and two-pass/single-pass
+  equivalence regression guard
+- `docs/superpowers/specs/2026-05-20-two-pass-scanner-design.md` — design spec
+- `docs/superpowers/plans/2026-05-20-two-pass-scanner.md` — implementation plan
+- `docs/raptor/Raptor_Inbox.md` — inbox for observations logged during app use
+- `.claude/skills/raptor-inbox/SKILL.md` — project skill for logging inbox entries
+
+#### Changed
+- `ScanTab._scan_job` now calls `scanner.scan_files_only()` instead of `scan_all()`;
+  Stage 2 starts automatically on completion (or after scan error)
+- `ScanTab._on_scan` cancels any in-progress checksum job before starting a new scan
+  (no wait — Stage 2 is signaled and proceeds to wind down independently)
+- `ScanTab.request_cancel_current_job` extended: ESC cancels Stage 2 when no Stage 1 is running
+- `ScanTab._on_cleanup_missing` and `_remove_root_from_tracking` cancel the checksum job
+  before their DB write operations
+- `.gitignore` updated to exclude `settings.local.json`, `*-workspace/`, `.clone/`, `.superpowers/`
+- `CLAUDE.md` hardened: feature branch requirement made explicit in skill table, Feature
+  Development Loop, and repository rules — applies to subagent-driven workflows too
+
+#### Fixed
+- Unused `Tuple` import removed from `core/events/event_hub.py`
+- `_on_job_error` now triggers `_start_checksum_job()` on scan errors, so Stage 2 always
+  runs even when Stage 1 fails (files indexed before the error still need checksums)
+
+---
+
 ### Checksum deduplication (2026-05-18)
 
 #### Added

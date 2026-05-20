@@ -1,6 +1,6 @@
 # Raptor Status
 
-**Last updated:** 2026-05-18 (end of checksum dedupe session)
+**Last updated:** 2026-05-20 (end of two-pass scanner session)
 **Active branch:** `raptor`
 **Current milestone:** Pre-MVP — active feature development
 
@@ -40,47 +40,46 @@ Auto project detection · Smart folders
 
 ## Current Work
 
-**Phase:** Active feature development — `raptor` branch is clean, all tests passing (97).
+**Phase:** Active feature development — `raptor` is clean and synced to `origin/raptor`.
+106 tests passing (2 pre-existing failures in `test_settings_tab_*` unrelated to recent work).
 
-**Next action:** Address P1/P2 audit debt (Open Items #1–2), or open a PR to land the
-checksum dedupe feature on `raptor` (branch is clean and complete).
+**Next action:** Address Open Items #1–2 (P1/P2 audit debt), or investigate the DB lock
+bug (Open Item #7) discovered while testing the two-pass scanner.
 
 ---
 
 ## Last Session Summary
 
-**Date:** 2026-05-18
-**Session type:** Full feature implementation — checksum deduplication (MVP)
+**Date:** 2026-05-20
+**Session type:** Full feature implementation — two-pass scanner (non-blocking checksumming)
 
-Completed — all 13 commits on `raptor`, 97 tests passing:
+Completed — 12 commits pushed to `origin/raptor`, 106 tests passing:
 
-- **Schema v9** (`core/db/schema.py`, `core/model/file.py`): `file.checksum TEXT` nullable
-  column + `idx_file_checksum` index; `File.checksum: Optional[str] = None` field added;
-  `_migrate_to_v9()` idempotent migration.
-- **Incremental checksumming** (`core/scanner/scanner.py`, `context.py`): Scanner computes
-  SHA-256 per file only when `size_bytes`, `mtime_unix`, or `checksum` changed/is NULL.
-  `ScanResult` gains `files_checksummed` and `files_without_checksum`. `AppLog` injected
-  into Scanner via `context.py`. OSError during hashing preserves existing checksum.
-- **Duplicate query helpers** (`core/db/duplicates.py`): `DuplicateFile`, `DuplicateGroup`
-  dataclasses; `query_duplicate_groups()`, `get_duplicate_file_ids()`,
-  `count_checksummed_files()`. Qt-free.
-- **`query_library_files_by_ids`** (`core/db/file_records.py`): bridges `DuplicateFile`
-  IDs → `LibraryFileRow` objects for `FileTableModel` reuse in the detail panel.
-- **Tags column** (`ui/models/file_table_model.py`, `ui/ui_constants.py`): `FileRow.is_duplicate`
-  field; "Duplicate" chip shown in Tags column for duplicate files. `DEFAULT_VISIBLE_FILE_COLUMNS`
-  updated.
-- **`DuplicatesView` widget** (`ui/views/duplicates_view.py`): status banner, summary line,
-  groups table (`DuplicateGroupTableModel`, sortable by Copies/Size/Overlap/Locations),
-  detail panel (reuses `FileTableModel`), "Copy path(s)" clipboard action.
-- **LibraryTab wiring** (`ui/views/library_tab.py`): Duplicates as third mode (index 2 in
-  `QStackedWidget`); filter/search handlers short-circuit for duplicates mode.
-- **Tests**: `test_schema_v9.py` (5), `test_scanner_checksum.py` (6), `test_db_duplicates.py`
-  (11), plus 3 new tests in `test_library_file_query.py`. Total suite: 97 passing.
+- **`Scanner.scan_files_only()`** (`core/scanner/scanner.py`): Stage 1 of the two-pass
+  scan — walks roots, upserts file records, never calls `sha256_file()`. New/changed files
+  get `checksum = NULL`; unchanged files preserve their existing checksum. `scan_all()`
+  left completely unchanged.
+- **`Scanner.compute_missing_checksums()`** (`core/scanner/scanner.py`): Stage 2 —
+  batch re-query loop (`SELECT ... WHERE checksum IS NULL LIMIT 50`) with `failed_ids`
+  exclusion to prevent infinite loops on unreadable files. Cancel-safe.
+- **`ChecksumResult` dataclass** (`core/scanner/scanner.py`): `files_checksummed`,
+  `files_failed`, `canceled`.
+- **`ChecksumFinished` event** (`core/events/event_hub.py`): emitted by `ScanTab` when
+  Stage 2 completes or is canceled.
+- **`ScanTab` two-slot orchestration** (`ui/views/scan_tab.py`): second job slot
+  (`_current_checksum_job` / `_checksum_cancel`) runs Stage 2 silently — never disables
+  UI buttons. Stage 2 always starts after Stage 1 (even on scan error). `_checksum_restart_pending`
+  flag prevents two concurrent checksum workers when a new scan fires while Stage 2 is
+  winding down. ESC cancels Stage 2 when Stage 1 is not running.
+- **Tests**: `tests/test_scanner_two_pass.py` — 9 tests covering `scan_files_only` and
+  `compute_missing_checksums` behavior, including two-pass/single-pass equivalence guard.
+- **Tooling**: `.gitignore` updated; `CLAUDE.md` hardened with explicit feature branch
+  policy for subagent-driven workflows; `Raptor_Inbox.md` and `raptor-inbox` skill added.
 
 Next session should start with:
-- Open a PR to merge `raptor` → `raptor` (or tag the checksum dedupe work)
+- Investigate Open Item #7 (DB lock when adding a root during Stage 2 checksum pass)
 - Address Open Items #1–2 (P1/P2 audit debt: `File.version_id` type fix, dead code deletion)
-- Begin UI rewrite or next MVP feature — see Milestone Tracker
+- **Remember:** Create a GitHub Issue and feature branch before any implementation work
 
 ---
 
@@ -94,3 +93,6 @@ Next session should start with:
 | 4 | Fix UI freeze (smay3d/assethub#1) | P2 | Async preview loading needed; defer to UI rewrite |
 | 5 | Design UI visual style | Medium | Deferred to UI design stage; stub at `docs/raptor/Raptor_StyleGuide.md` |
 | 6 | Write `raptor-build` skill | Low | Needed before first beta distribution |
+| 7 | Fix DB lock when adding a root during Stage 2 checksum pass | P2 | Observed during testing 2026-05-20; `_on_cleanup_missing` cancel guard covers removal but "add root" path not addressed |
+| 8 | Fix pre-existing test failures in `test_settings_tab_refresh.py` and `test_settings_tab_stats.py` | P2 | `NotADirectoryError` during Windows temp dir cleanup in `shutil.rmtree`; 2 tests failing, 106 passing |
+| 9 | Create `raptor-triage` skill and wire into pipeline | P2 | Skill not yet built. Four wiring points pending once created: (1) `CLAUDE.md §2` — add `Raptor_Inbox.md` to Documentation System table; (2) `CLAUDE.md §6` — add `raptor-triage` to Skill Usage Reference; (3) `raptor-session-start` — add inbox check step; (4) `raptor-session-end` — add optional triage prompt before Status update pass |
