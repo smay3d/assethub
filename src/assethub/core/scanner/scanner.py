@@ -291,7 +291,8 @@ class Scanner:
         """Stage 2 of two-pass scanning: hash all files with checksum IS NULL.
 
         Processes files in batches and re-queries after each batch so that
-        files indexed by a concurrent Stage 1 are picked up automatically.
+        files indexed by a concurrent Stage 1 scan of already-registered roots
+        are picked up automatically.
 
         Files that raise OSError during hashing are skipped (files_failed is
         incremented) and retain checksum=NULL for retry on the next call.
@@ -352,6 +353,10 @@ class Scanner:
 
                 root_path = root_map.get(int(storage_id))
                 if root_path is None:
+                    if self._log is not None:
+                        self._log.warn(
+                            f"Checksum skipped (unknown storage_id={int(storage_id)}): {relative_path}"
+                        )
                     failed_ids.add(int(file_id))
                     files_failed += 1
                     continue
