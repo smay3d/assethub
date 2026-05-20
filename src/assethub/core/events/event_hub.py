@@ -79,6 +79,11 @@ class HealthFinished:
     summary: Dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ChecksumFinished:
+    summary: Dict[str, Any]
+
+
 class EventHub:
     """Central application event hub."""
 
@@ -86,3 +91,4 @@ class EventHub:
         self.db_changed: Event[DbChanged] = Event("db_changed")
         self.scan_finished: Event[ScanFinished] = Event("scan_finished")
         self.health_finished: Event[HealthFinished] = Event("health_finished")
+        self.checksum_finished: Event[ChecksumFinished] = Event("checksum_finished")
